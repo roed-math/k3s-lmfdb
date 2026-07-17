@@ -30,6 +30,10 @@ if not assigned timelimit then timelimit := "0"; end if;
 timelimit := StringToInteger(timelimit);
 if not assigned adjlimit then adjlimit := "0"; end if;
 adjlimit := StringToInteger(adjlimit);
+// Wall-clock each individual lattice gets (canonical form, automorphism group, theta).
+// 0 falls back to the old timeout/class_number budget.  See FillGenus.
+if not assigned perlattice then perlattice := "0"; end if;
+perlattice := StringToInteger(perlattice);
 // useorth:=0 disables the orbit-method enumeration; 1 (default) routes by
 // UseOrthHeuristic; 2 forces the orbit method for every definite rank >= 3 genus
 // (mainly for testing/benchmarking, and to exercise the provenance columns at
@@ -93,7 +97,7 @@ end if;
 failed := [];
 for l in label_list do
     try
-        FillGenus(l : timeout := timeout, masslimit := masslimit, sizelimit := sizelimit, timelimit := timelimit, adjlimit := adjlimit, use_orth := useorth, force_orth := forceorth);
+        FillGenus(l : timeout := timeout, masslimit := masslimit, sizelimit := sizelimit, timelimit := timelimit, adjlimit := adjlimit, perlattice := perlattice, use_orth := useorth, force_orth := forceorth);
     catch e
         printf "ERROR: %o: %o\n", l, e;
         Append(~failed, l);
