@@ -32,7 +32,7 @@ This table stores lattices (free Z-modules with a nondegenerate symmetric inner 
 | is_theta_distinguished | boolean | whether theta series distinguish lattices within this genus |
 | hash_function | text | a string picking one of a set of possible hash functions.  The hash value stored for lattices within this genus is computed using this hash function |
 | is_hash_distinguished | boolean | whether the chosen hash function distinguishes lattices within this genus |
-| ambient_lattice | text | if provided, lattices in this genus are stored as the orthogonal complement of one or more vectors in the lattice with this label.  This may be instead of or in addition to storing a Gram matrix |
+| ambient_genus | text | if provided, the label of the genus from which this genus was enumerated: each lattice in this genus arises as the orthogonal complement of a vector in some lattice of the ambient genus (which lattice, and which vector, are recorded per-lattice in lat_lattices via ambient_lattice and orthogonal_complement).  The ambient lattice is not constant across the genus, so only the ambient genus is recorded here |
 | scale | integer | the gcd of the entries of the Gram matrix for any lattice in this genus |
 | rep | integer[] | a Gram matrix for a lattice within this genus.  Not stored if the lattices in this genus are all in lat_lattices |
 | genus_hash | bigint | a hash value that can be easily computed from a lattice in this genus (should be collision-free) |

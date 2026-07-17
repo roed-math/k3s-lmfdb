@@ -1,6 +1,6 @@
 // Genus representatives for rank-2 lattices of square determinant -m^2, where
-// Magma's GenusRepresentatives fails (fill_genus.m).
-import "fill_genus.m" : genus_reps_square_disc, square_disc_isometric;
+// Magma's GenusRepresentatives fails (genus_reps.m).
+import "genus_reps.m" : genus_reps_square_disc, square_disc_isometric;
 
 // m = 3: every genus has class number 1.
 for k in [0..5] do

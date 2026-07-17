@@ -2,6 +2,7 @@
 
 import sys
 import time
+import shutil
 import argparse
 import subprocess
 import contextlib
@@ -31,13 +32,18 @@ parser.add_argument("-k", "--nokthree", action="store_true", help="By default, w
 
 # Parallelization
 parser.add_argument("-j", "--jobs", type=int, default=128, help="Number of parallel processes to use")
-parser.add_argument("-b", "--batch-mass", type=int, default=128, help="Batch genus enumeration instances together until the total mass exceeds this amount")
+parser.add_argument("-b", "--batch-mass", type=int, default=128, help="DEPRECATED, ignored.  Batches are now sized by estimated wall-clock work (--batch-work-target), not mass.  Mass is a terrible proxy for cost: high-rank genera have huge automorphism groups, so their mass is ~1e-6, and hundreds of expensive genera packed into one mass-bounded batch that then ran for tens of minutes.  Kept only so existing invocations don't error.")
+parser.add_argument("--batch-work-target", type=float, default=120.0, help="Batch genus-enumeration instances together until their estimated fill cost reaches this many seconds, so every batch is ~equal wall-clock regardless of rank/signature mix.  Costs come from a measured per-genus calibration (see genus_work): rank<=8 and all indefinite genera are seconds, while a single definite rank 9-12 genus costs minutes and so lands in a batch of its own.  This is the primary batching control.")
+parser.add_argument("--batch-size", type=int, default=32, help="Backstop cap on genera per batch, regardless of work target.  Mainly bounds the per-job command-line length (one label each); for cheap genera the work target rarely fills a batch, so this keeps those batches from growing unwieldy.")
 
 # Don't store too many lattices
 parser.add_argument("--enum-masslimit", type=int, default=1000, help="If the mass of a genus is larger than this threshold, don't even try to enumerate lattices within")
-parser.add_argument("--enum-timelimit", type=int, default=300, help="Maximum number of seconds to spend on enumerating a genus") # TODO: calibrate this based on how much time we want to spend
+parser.add_argument("--enum-timeout", type=int, default=300, help="Seconds allowed for the genus-representatives computation of a single genus.  This was previously not passed through at all, so it silently fell back to run_fill_genus.m's 60s default and 1.8%% of definite genera (all rank 11-12) failed to enumerate entirely -- no class number and no lattices, a hole that null-scanning cannot see since the genus is simply absent from the per-lattice tables.  The computation is hard-killed past this, so it still bounds the worst case.")
+parser.add_argument("--enum-timelimit", type=int, default=900, help="Maximum wall-clock seconds for a genus's per-lattice loop.  Overrunning it does NOT keep partial data: FillGenus discards every lattice of that genus (a partial set would contradict the recorded class_number) and keeps only the genus-level record.  So this is a coverage switch, not a speed knob -- and because it is wall-clock, it makes database contents depend on machine load, which is why --enum-masslimit is the better place to express a real coverage policy.  Calibrated at C=256: definite rank 9-12 genera need 97-1005s to COMPLETE (medians 221/460/384/693s by rank), so 900 completes ~97% of them; 300 (the old default) silently discarded every lattice of most rank 10-12 genera, and 60 discarded essentially all of rank 9-12.")
 parser.add_argument("--enum-sizelimit", type=int, default=1000, help="For genera with class number larger than this, do not store individual lattices within the genus")
-parser.add_argument("--enum-adjlimit", type=int, default=100, help="For genera with class number larger than this, do not compute the adjacency (Hecke) matrix (its cost is ~class_number^2, so it dominates fill for moderate class numbers at high rank)")
+parser.add_argument("--enum-adjlimit", type=int, default=0, help="Work budget for the adjacency (Hecke) matrix: skip it when the estimated work (~class_number * sum_p p^(rank-2) over the Hecke primes p) exceeds this; 0 = no budget, always attempt it.  Defaults to 0 because the estimate mis-prices reality badly -- at rank 7 the sum_p p^5 term crosses a 20000 budget at class number 6, yet a whole rank-7 genus fills in ~4s, so a budget of 20000 silently dropped Hecke data for 65 rank-7 genera (4.4%% of definite genera overall) that were never expensive.  AdjacencyMatrix now runs under a hard-killed TimeoutCall, which bounds it by measured time instead of a bad model; prefer that.  Set this only if you specifically want to skip adjacency without even trying.")
+parser.add_argument("--no-orth", action="store_true", help="Disable the orbit-method genus enumeration (use the p-neighbour walk only)")
+parser.add_argument("--warm-limit", type=int, default=300, help="Wall-clock budget (seconds) for each fill job's batch cache pre-warm.  The pre-warm runs in the parent Magma process (so forked per-genus enumerations inherit the warmed cache) and therefore cannot be bounded by TimeoutCall; past this budget it aborts at a safe point and the job continues with a partial cache plus the on-disk tier.")
 
 # Skip stages
 parser.add_argument("--skip-list-genera", action="store_true", help="Assume that genera have already been listed")
@@ -46,6 +52,8 @@ parser.add_argument("--skip-embeddings", action="store_true", help="Do not compu
 parser.add_argument("--skip-tensor", action="store_true", help="Do not compute tensor product decompositions")
 parser.add_argument("--skip-names", action="store_true", help="Do not find lattice names")
 parser.add_argument("--skip-connect", action="store_true", help="Do not run_connect_genus.m")
+
+parser.add_argument("--clean", action="store_true", help="Delete the pipeline's output directories before running, so the result cannot silently blend this run's output with stale files from earlier runs.  Every stage writes per-file with Overwrite and never deletes, so anything this run does NOT produce keeps whatever an earlier run left there -- and that mixture is invisible to null-scanning, since the stale row is present rather than \\N.  Use this whenever settings changed and you want the output to mean exactly one run.")
 
 ## TODO: Support building on partial progress by checking what files already exist, or by writing a json file that is updated with state
 
@@ -86,38 +94,49 @@ def build_genus_inputs():
         inputs.extend(inputs_sig)
     return inputs
 
-def build_enumeration_inputs(fname):
-    m = 0
-    M = args.batch_mass
+# Calibrated per-genus fill cost in seconds (from a C=256 rank-vs-wall-clock calibration).
+# Definite genera dominate, and their cost cliffs at rank 9 where the per-lattice loop
+# saturates enum_timelimit; indefinite genera (SpinorRepresentatives, small class number)
+# are uniformly cheap (~0.5s) at every rank.  We batch by summing this cost to a target so
+# every batch is roughly equal wall-clock.
+_DEF_COST = {1: 1.1, 2: 1.7, 3: 2.2, 4: 2.4, 5: 2.9, 6: 4.1, 7: 3.8, 8: 11.0,
+             9: 221.0, 10: 460.0, 11: 384.0, 12: 693.0}
+def genus_work(r, definite):
+    if not definite:
+        return 0.5
+    if r in _DEF_COST:
+        return _DEF_COST[r]
+    # Rank >= 13 was never calibrated -- the C=256 census stops at 12 for lack of
+    # determinant room -- so fall back to the timelimit, the only bound we have.  These
+    # weights are also C=256-specific: at larger determinants automorphism groups shrink
+    # and class numbers grow, so the rank 9-12 costs will not transfer to the C=32768
+    # run.  Recalibrate against the actual census before trusting them there.
+    return float(args.enum_timelimit)
+
+def build_enumeration_inputs(fname, rank=None):
+    W = 0.0
+    T = args.batch_work_target
     labels = []
-    with open("genera_basic.format") as F:
-        basic = F.read().strip().split("|")
-        massi = basic.index("mass")
-    def get_mass(path):
-        with open(path) as F:
-            pieces = F.read().strip().split("|")
-            num, den = pieces[massi].strip("{}").split(",")
-            return float(num) / float(den)
     total = 0
     with open(fname, "w") as Fout:
         for sig in signatures():
             r = sum(sig)
+            if rank is not None and r != rank:
+                continue
             nplus = sig[0]
             base = Path("genera_basic", str(r), str(nplus))
             if not base.is_dir():
                 continue            # no genera enumerated for this signature
+            definite = (r == nplus)
             for genus in base.iterdir():
-                if r == nplus:
-                    m += get_mass(genus)   # genus is already the full path from iterdir()
-                else:
-                    m += 1 # pretend indefinite genera have mass 1
+                W += genus_work(r, definite)
                 labels.append(genus.name)
-                if m > M:
+                if W >= T or len(labels) >= args.batch_size:
                     _ = Fout.write(":".join(labels) + "\n")
-                    m = 0
+                    W = 0.0
                     labels = []
                     total += 1
-        if m > 0 :
+        if labels:
             _ = Fout.write(":".join(labels) + "\n")
             total += 1
     return total
@@ -146,7 +165,38 @@ def parallel(jobfile, joblog, magma_args, colsep=None):
     if result.returncode != 0:
         print(f"  WARNING: {result.returncode} job(s) failed (see {joblog}); continuing", flush=True)
 
+def clean_outputs():
+    """Delete pipeline outputs so this run's data cannot be a mixture of several runs.
+
+    Every stage writes per-file with Overwrite and never removes anything, so a genus or
+    lattice this run does not produce silently keeps the file an earlier run wrote --
+    e.g. a genus whose per-lattice loop overruns --enum-timelimit stores no lattices at
+    all (FillGenus drops them rather than record a set that contradicts class_number),
+    yet the lattices a previous, more generous run stored are still on disk.  Null-scans
+    cannot see this (the stale row is present, not \\N), so coverage looks better than it
+    is -- it previously made an audit blame connect for a gap that fill had created.
+    """
+    targets = ["genera_advanced", "genera_hash", "lattice_basic_data",
+               "lattice_advanced_data", "lattice_hashes", "voronoi", "shortest",
+               "orth_cache"]   # stale cached genera would leak old counters/labels into provenance
+    if not args.skip_list_genera:
+        targets.append("genera_basic")   # regenerated below; otherwise it is this run's input
+    removed = []
+    for t in targets:
+        p = Path(t)
+        if p.is_dir():
+            removed.append(f"{t} ({sum(1 for q in p.rglob('*') if q.is_file())} files)")
+            shutil.rmtree(p)
+    for f in [Path("atomic_names")] + sorted(Path(".").glob("atomic_names_partial_*")):
+        if f.exists():
+            f.unlink()
+            removed.append(f.name)
+    print("Cleaned: " + (", ".join(removed) if removed else "(nothing to remove)"), flush=True)
+
+
 def main():
+    if args.clean:
+        clean_outputs()
     if not args.skip_list_genera:
         inputs = build_genus_inputs()
         total = len(inputs)
@@ -168,17 +218,35 @@ def main():
 
         print(f"\nDone listing genera! ({time.monotonic() - start_time:.1f}s)")
 
-    gcount = build_enumeration_inputs("genus_jobs.txt")
+    gcount = build_enumeration_inputs("genus_jobs.txt")   # full list, used by the connect stages
     if not args.skip_enumerate_genera:
-        with timed(f"Enumerating genera ({gcount} batches)"):
-            # Pass the enumeration guards through to FillGenus so a few pathological
-            # high-rank genera can't dominate wall-clock (they otherwise run for hours):
-            # skip enumerating past enum-masslimit, store genus-level data only past
-            # enum-sizelimit, and cap per-genus wall-clock at enum-timelimit.
-            parallel("genus_jobs.txt", "fill.joblog",
-                     [f"masslimit:={args.enum_masslimit}", f"sizelimit:={args.enum_sizelimit}",
-                      f"timelimit:={args.enum_timelimit}", f"adjlimit:={args.enum_adjlimit}",
-                      "labels:={1}", "run_fill_genus.m"])
+        # Work DOWNWARD by rank, with a barrier between ranks.  The orbit method
+        # enumerates a definite genus by descending from a parent genus of rank+1
+        # and smaller determinant, and FillGenus persists every finished definite
+        # genus (with its label and per-lattice counters) to the on-disk orth
+        # cache (orth_cache/).  Since a parent's determinant is at most half the
+        # child's, every parent of a rank-r genus lies inside the rank-(r+1) box,
+        # so completing rank r+1 first turns parent lookups into disk hits:
+        # one-step descents against already-filled genera (which also makes the
+        # ambient_genus / ambient_lattice provenance resolvable) instead of cold
+        # recursive chains.  Within a rank, batches run in parallel as before;
+        # only the ranks are sequenced.
+        for r in sorted(set(ranks()), reverse=True):
+            rcount = build_enumeration_inputs(f"genus_jobs_{r}.txt", rank=r)
+            if rcount == 0:
+                continue
+            with timed(f"Enumerating genera of rank {r} ({rcount} batches)"):
+                # Pass the enumeration guards through to FillGenus so a few pathological
+                # genera can't dominate wall-clock: skip enumerating past enum-masslimit,
+                # store genus-level data only past enum-sizelimit, and cap per-genus
+                # wall-clock at enum-timelimit.
+                parallel(f"genus_jobs_{r}.txt", f"fill_{r}.joblog",
+                         [f"timeout:={args.enum_timeout}", f"masslimit:={args.enum_masslimit}",
+                          f"sizelimit:={args.enum_sizelimit}", f"timelimit:={args.enum_timelimit}",
+                          f"adjlimit:={args.enum_adjlimit}",
+                          f"useorth:={0 if args.no_orth else 1}",
+                          f"warmlimit:={args.warm_limit}",
+                          "labels:={1}", "run_fill_genus.m"])
 
     if not args.skip_embeddings:
         print("Finding lattice embeddings (TODO: Oscar embedding code)")

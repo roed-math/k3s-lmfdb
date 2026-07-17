@@ -7,3 +7,5 @@
 [submodule "lattices/lattools"]
 	path = lattices/lattools
 	url = https://github.com/assaferan/lattools.git
+[submodule "lattices/Parallel.magma"]
+	url = git@github.com:assaferan/Parallel.magma.git

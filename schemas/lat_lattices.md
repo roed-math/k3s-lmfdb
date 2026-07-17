@@ -59,7 +59,9 @@ Label: `dimension.signature.determinant.genus_spec.tiebreaker` where
 | [gram](https://beta.lmfdb.org/knowledge/show/lattice.gram) | smallint[] | A gram matrix for this isometry class |
 | gram_others | numeric[] | A list of additional gram matrices.  This may include human-preferred gram matrices other than the canonical Gram matrix (for E8 for example), or Gram matrices whose entries are too large to fit in an integer |
 | gram_is_canonical | boolean | whether the Gram matrix is canonical (null if not definite) |
-| orthogonal_complement | integer[] | a vector or list of vectors in the ambient lattice for the genus so that this lattice is isometric to the orthogonal complement of their span |
+| counter | integer | the position of this lattice within its genus (1-based), matching the sort order used to assign the label tiebreaker; ambient_lattice references in other genera point at this value |
+| ambient_lattice | integer | the counter of the lattice, within the genus recorded as ambient_genus in lat_genera, in which this lattice arises as the orthogonal complement of the vector(s) in orthogonal_complement (null when the lattice was not produced by such a descent) |
+| orthogonal_complement | integer[] | a vector or list of vectors so that this lattice is isometric to the orthogonal complement of their span, inside the lattice referenced by ambient_lattice.  When the enumeration works up a chain of genera toward a unimodular lattice, the vector is given in the first lattice along the chain for which a Gram matrix is provided |
 | [canonical_gram] | integer[] | Canonical form for the Gram matrix; currently only available for definite lattices |
 | [genus_label](https://beta.lmfdb.org/Lattice/Labels) | text | The part of the label that is constant across a genus |
 | conway_symbol | text | the Conway symbol for the genus |

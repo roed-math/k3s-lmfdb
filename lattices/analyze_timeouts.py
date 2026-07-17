@@ -36,44 +36,67 @@ def analyze_nulls(fmt_file, data_dir):
         print(f"  {c.ljust(width)}  {k:>7}  {k / n:>6.1%}{flag}")
 
 
-def genus_fill(fmt_file, data_dir):
-    """Count definite genera whose class_number is \\N (enumeration did not finish)."""
-    cols = Path(fmt_file).read_text().strip().split("|")
+def genus_fill(basic_fmt, adv_fmt, data_dir):
+    """Report definite genera whose genus-fill did not finish, plus adjacency coverage.
+
+    A genera_advanced row is the *basic* row (genera_basic.format) followed by the
+    advanced columns (genera_advanced.format), so an advanced column's index into the
+    row must be offset by the number of basic columns.  Indexing with the advanced
+    format alone reads field 0 -- the label -- instead of class_number, which compares
+    a label to "\\N" and therefore reports 0 failures no matter what really happened.
+    The field-count check below makes any future format drift fail loudly rather than
+    silently returning a clean bill of health.
+    """
+    basic = Path(basic_fmt).read_text().strip().split("|")
+    adv = Path(adv_fmt).read_text().strip().split("|")
+    off = len(basic)
+    width = off + len(adv)
     try:
-        ci = cols.index("class_number")
+        ci = off + adv.index("class_number")
+        ai = off + adv.index("adjacency_matrix")
     except ValueError:
-        print("  (no class_number column)")
+        print("  (missing class_number / adjacency_matrix column)")
         return
-    tot_def = fail_def = tot_indef = 0
-    fails = []
+    tot_def = fail_def = tot_indef = noadj = bad = 0
+    fails, adjgaps = {}, {}
     for p in Path(data_dir).rglob("*"):
         if not p.is_file():
             continue
         # path .../<rank>/<nplus>/<label>
         rank, nplus = int(p.parent.parent.name), int(p.parent.name)
-        definite = rank == nplus
-        val = p.read_text().split("\n", 1)[0].split("|")[ci]
-        if definite:
-            tot_def += 1
-            if val == "\\N":
-                fail_def += 1
-                fails.append((rank, p.name))
-        else:
+        row = p.read_text().split("\n", 1)[0].split("|")
+        if len(row) != width:
+            bad += 1
+            continue
+        if rank != nplus:
             tot_indef += 1
+            continue
+        tot_def += 1
+        if row[ci].strip() == "\\N":
+            fail_def += 1
+            fails.setdefault(rank, []).append(p.name)
+        if row[ai].strip() == "\\N":
+            noadj += 1
+            adjgaps[rank] = adjgaps.get(rank, 0) + 1
     print(f"  definite genera:          {tot_def}")
     print(f"  indefinite genera:        {tot_indef}  (class_number N/A by design)")
+    if bad:
+        print(f"  !! {bad} rows with unexpected field count (expected {width}) -- format drift?")
+    if not tot_def:
+        return
     print(f"  definite w/ class_number=\\N (genus-fill did NOT complete): {fail_def}"
-          f"  ({fail_def / tot_def:.2%} of definite)" if tot_def else "")
-    if fails:
-        byrank = {}
-        for r, lab in fails:
-            byrank.setdefault(r, []).append(lab)
-        for r in sorted(byrank):
-            print(f"    rank {r}: {len(byrank[r])}  e.g. {byrank[r][:3]}")
+          f"  ({fail_def / tot_def:.2%} of definite)")
+    print(f"  definite w/o adjacency_matrix (no Hecke data): {noadj}"
+          f"  ({noadj / tot_def:.2%} of definite)")
+    for r in sorted(fails):
+        print(f"    fill failed   rank {r:2}: {len(fails[r]):4}  e.g. {fails[r][:3]}")
+    for r in sorted(adjgaps):
+        print(f"    no adjacency  rank {r:2}: {adjgaps[r]:4}")
 
 
 def joblogs():
-    for name in ["fill", "tensor", "names", "connect"]:
+    # "connect" is the old single-pass log; the two-pass connect writes connect1/connect2.
+    for name in ["fill", "tensor", "names", "connect", "connect1", "connect2"]:
         f = Path(f"{name}.joblog")
         if not f.exists():
             continue
@@ -93,7 +116,7 @@ if __name__ == "__main__":
     print("=" * 70)
     print("GENUS-FILL COMPLETION (genera_advanced)")
     print("=" * 70)
-    genus_fill("genera_advanced.format", "genera_advanced")
+    genus_fill("genera_basic.format", "genera_advanced.format", "genera_advanced")
     print()
     print("=" * 70)
     print("JOBLOG SUMMARY")

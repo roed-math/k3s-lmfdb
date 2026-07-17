@@ -1,7 +1,5 @@
 declare verbose FillGenus, 1;
 
-import "neighbours.mag" : neighbours;
-
 function hecke_primes(rank)
     if rank lt 8 then
         return [2,3,5];
@@ -96,37 +94,11 @@ function RescaledDualNF(L)
     return NumberFieldLattice(Rows(ChangeRing(B, K)) : InnerProduct := ChangeRing(M,K));
 end function;
 
-function genus_reps_Magma(L)
-    // The bound is set to infinity to avoid Magma printing an error message
-    // without throwing a runtime error.
-    if IsPositiveDefinite(GramMatrix(L)) or (Rank(L) eq 2) then
-      return GenusRepresentatives(L : Bound := Infinity());
-    end if;
-    // due to some bugs in Magma, we convert to number field
-    LF := NumberFieldLattice(L);
-    reps := GenusRepresentatives(LF);
-    return [LatticeWithGram(ChangeRing(GramMatrix(r), Integers()) :
-			    CheckPositive := false) : r in reps];
-end function;
-
-function genus_reps_Logan(L)
-    return Setseq(neighbours(L : thorough));
-end function;
-
-function genus_reps_Faster(L)
-    // Our own mass-verified p-neighbour enumeration (definite lattices only).
-    reps := GenusRepresentativesFaster(L);
-    return reps;
-end function;
-
-function genus_reps_Spinor(L)
-    // Indefinite lattices of rank >= 3: by Eichler each proper spinor genus is a single
-    // class, so the spinor-genus representatives ARE the genus representatives.  This is
-    // a fallback for when Magma's GenusRepresentatives fails (e.g. signature (2,2) rank 4
-    // -- "Illegal null sequence" in its number-field-lattice code); SpinorRepresentatives
-    // uses a different path and succeeds where GenusRepresentatives does not.
-    reps := SpinorRepresentatives(L);
-    return reps;
+function adjacency_matrix_of(G, p)
+    // Wrapped so it can run under TimeoutCall: AdjacencyMatrix walks the p-neighbour graph
+    // in a C-level builtin that does not yield to Magma's Alarm, so it needs the HardKill
+    // watchdog to be bounded (it can take >75s for a single rank-8 genus).
+    return AdjacencyMatrix(G, p);
 end function;
 
 function SphereVolume(n)
@@ -140,67 +112,18 @@ function SphereVolume(n)
     end if;
 end function;
 
-// Exact GL2(Z)-isometry test for the canonical rank-2 forms [[0,m],[m,k1]] and
-// [[0,m],[m,k2]] of (square) determinant -m^2.  These isotropic forms have finite
-// isometry groups, so we can decide isometry directly: an isometry sends a
-// primitive isotropic vector of the first to one of the second, and the rest of
-// the basis is then determined up to the (finitely many) sign/line choices.
-function square_disc_isometric(k1, k2, m)
-    G1 := Matrix(Integers(), 2, 2, [0, m, m, k1]);
-    G2 := Matrix(Integers(), 2, 2, [0, m, m, k2]);
-    g1 := GCD(k1, 2*m);                       // GCD(0, 2m) = 2m
-    isotropic := [ Vector(Integers(), [1, 0]),
-                   Vector(Integers(), [-k1 div g1, (2*m) div g1]) ];
-    for v1 in isotropic, sgn in [1, -1] do
-        w1 := sgn * v1;
-        row := Vector(Integers(), Eltseq(Matrix(w1) * G1));   // w1^t G1
-        d := GCD(row[1], row[2]);
-        if d eq 0 or m mod d ne 0 then continue; end if;
-        _, p, q := XGCD(row[1], row[2]);                      // p*row[1] + q*row[2] = d
-        v20 := (m div d) * Vector(Integers(), [p, q]);        // <w1, v20> = m
-        Qv20 := (Matrix(v20) * G1 * Transpose(Matrix(v20)))[1][1];
-        if (k2 - Qv20) mod (2*m) ne 0 then continue; end if;  // Q(v20 + t w1) = Qv20 + 2 t m
-        v2 := v20 + ((k2 - Qv20) div (2*m)) * w1;
-        U := Matrix(Integers(), 2, 2, [w1[1], v2[1], w1[2], v2[2]]);   // columns w1, v2
-        if Abs(Determinant(U)) eq 1 and Transpose(U)*G1*U eq G2 then
-            return true;
-        end if;
-    end for;
-    return false;
-end function;
-
-// Genus representatives of a rank-2 lattice L0 of square determinant -m^2.  Magma's
-// GenusRepresentatives fails here (it reduces to binary quadratic forms, which
-// reject square discriminants).  Every such lattice is isometric to a canonical
-// [[0,m],[m,k]] with 0 <= k < 2m; we keep those in L0's genus (Genus() is
-// reliable for these even though the isometry routines are not) and remove
-// duplicate isometry classes with the exact test above.
-function genus_reps_square_disc(L0)
-    m := Isqrt(Integers() ! (-Determinant(L0)));
-    G0 := Genus(L0);
-    reps := [];
-    rep_ks := [];
-    for k in [0 .. 2*m - 1] do
-        Lk := LatticeWithGram(Matrix(Rationals(), 2, 2, [0, m, m, k]) : CheckPositive := false);
-        if Genus(Lk) ne G0 then continue; end if;
-        if forall{ kr : kr in rep_ks | not square_disc_isometric(k, kr, m) } then
-            Append(~rep_ks, k);
-            Append(~reps, Lk);
-        end if;
-    end for;
-    return reps;
-end function;
-
-intrinsic FillGenus(label::MonStgElt : timeout := 1800, masslimit := 0, sizelimit := 0, timelimit := 0, adjlimit := 0)
+intrinsic FillGenus(label::MonStgElt : timeout := 1800, masslimit := 0, sizelimit := 0, timelimit := 0, adjlimit := 0, use_orth := true, force_orth := false)
 {Fill the data for a genus and its lattice representatives, given files in the genera_basic format.
 
 Enumeration guards (0 = unlimited): masslimit skips enumerating a definite genus whose
-mass exceeds it (its class number is too large to enumerate); adjlimit skips the
-adjacency (Hecke) matrix once the class number exceeds it (its cost is ~class_number^2);
+mass exceeds it (its class number is too large to enumerate); adjlimit is a work budget
+for the adjacency (Hecke) matrix -- skip it when the estimated work, ~class_number times
+sum_p p^(rank-2) over the Hecke primes p, exceeds adjlimit;
 sizelimit records the genus-level data but skips storing individual lattices past that
 class number; timelimit is a per-genus wall-clock cap on the per-lattice loop.  In every
 case the genus-level record is still written, so a guarded genus is bounded rather than
-either running for hours or going missing.}
+either running for hours or going missing.  use_orth selects the orbit-method
+enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
     genus_t0 := Realtime();
     data := Split(Split(Read(LabelPath("genera_basic", label)), "\n")[1], "|");
     basic_format := Split(Read("genera_basic.format"), "|");
@@ -229,59 +152,37 @@ either running for hours or going missing.}
     L0 := LWG(gram0 : CheckPositive := false);
     vprintf FillGenus, 1 : "Computing genus representatives...";
     reps := [];
-    // Rank-2 lattices of square determinant -m^2 have isotropic (split) forms, on
-    // which Magma's GenusRepresentatives fails (it reduces to binary quadratic
-    // forms, which reject square discriminants); these are handled directly.  Note
-    // the class number is NOT always 1 -- e.g. for m = 5 some genera have two
-    // classes.
     // masslimit: a definite genus of mass M has class number on the order of M, so a
     // very large mass means enumeration is hopeless -- skip it and keep only the
     // (cheap) genus-level record.  Mass is only defined for definite genera; indefinite
     // ones store "\N" here, so only parse it when definite.
-    skip_massive := false;
-    if (masslimit gt 0) and (n eq s) then
+    genus_mass := 0;
+    if (n eq s) and (basics["mass"] ne "\\N") then
         mass_pieces := Split(basics["mass"][2..#basics["mass"]-1], ",");
         genus_mass := StringToInteger(mass_pieces[1]) / StringToInteger(mass_pieces[2]);
-        skip_massive := genus_mass gt masslimit;
     end if;
+    skip_massive := (masslimit gt 0) and (n eq s) and (genus_mass gt masslimit);
     if skip_massive then
         vprintf FillGenus, 1 : "Skipping enumeration: mass exceeds masslimit %o\n", masslimit;
         genus_success := false;
-    elif n eq 2 and IsSquare(-Determinant(L0)) then
-        genus_success, reps, elapsed := TimeoutCall(timeout, genus_reps_square_disc, <L0>, 1);
-        vprintf FillGenus, 1 : "Genus representatives (square discriminant) computed in %o seconds\n", elapsed;
-    elif (n eq s) and (n ge 3) then
-        // Definite rank >= 3: our own p-neighbour enumeration (GenusRepresentativesFaster)
-        // is the default.  It is mass-verified -- it enumerates until the accumulated
-        // sum of 1/|Aut| equals the genus mass -- so it is provably complete when it
-        // terminates.  It also avoids Magma's GenusRepresentatives, which is slow and
-        // reliably fails at rank >= 7 (the "cs must be non-empty" bug); we used to run
-        // it first and wait out its 60s timeout before falling back, ~60s wasted per
-        // high-rank genus.  Magma is used only where Faster does not apply (below).
-        genus_success, reps, elapsed := TimeoutCall(timeout, genus_reps_Faster, <L0>, 1);
-        vprintf FillGenus, 1 : "Genus representatives (p-neighbours) computed in %o seconds\n", elapsed;
-    elif (n ne s) and (n ge 3) then
-        // Indefinite rank >= 3: SpinorRepresentatives is the default.  By Eichler each
-        // proper spinor genus is a single class, so the spinor-genus representatives ARE
-        // the genus representatives -- provably exact here.  It also avoids Magma's
-        // GenusRepresentatives, which fails on some indefinite genera (e.g. signature
-        // (2,2) rank 4 -- "Illegal null sequence" / "cs must be non-empty" in its LatNF
-        // code) and is slower even when it works.
-        genus_success, reps, elapsed := TimeoutCall(timeout, genus_reps_Spinor, <L0>, 1);
-        vprintf FillGenus, 1 : "Genus representatives (spinor genera) computed in %o seconds\n", elapsed;
     else
-        // Rank 1-2: neither Faster (needs definite rank >= 3) nor the spinor route (needs
-        // rank >= 3, indefinite) applies, so use Magma's general GenusRepresentatives.
-        genus_success, reps, elapsed := TimeoutCall(timeout, genus_reps_Magma, <L0>, 1);
-        vprintf FillGenus, 1 : "Genus representatives computed in %o seconds\n", elapsed;
+        // Method selection, per-method timing and fallbacks live in GenusReps
+        // (genus_reps.m); use_orth toggles the orbit method for definite rank >= 3,
+        // refined by the rank/mass heuristic (the neighbour walk stays the default
+        // for small class numbers at low rank, where it wins).
+        genus_success, reps, orth_prov := GenusReps(L0 : Timeout := timeout,
+            UseOrth := use_orth and (force_orth or UseOrthHeuristic(n, genus_mass)));
     end if;
     advanced["class_number"] := "\\N";
     advanced["adjacency_matrix"] := "\\N";
     advanced["adjacency_polynomials"] := "\\N";
-    advanced["ambient_lattice"] := "\\N";   // TODO: compute the ambient lattice
+    // ambient_genus: the genus of the parent lattices from which this genus's
+    // classes were obtained as orthogonal complements (orbit-method provenance);
+    // the per-lattice counter/vector references live in lat_lattices.
+    if not assigned orth_prov then orth_prov := 0; end if;
+    advanced["ambient_genus"] := (orth_prov cmpeq 0 or orth_prov[1] eq "") select "\\N" else orth_prov[1];
     have_adjacency := false;   // set below iff the adjacency (Hecke) matrix is computed
     if genus_success then
-        reps := reps[1];
         vprintf FillGenus, 1 : "Number of genus representatives: %o\n", #reps;
         advanced["class_number"] := #reps;
         vprintf FillGenus, 1 : "Computing adjacency matrix for p = ";
@@ -291,23 +192,44 @@ either running for hours or going missing.}
         // This works for 2.28 - should be replaced by SetGenus in 2.29
         G`Representatives := reps;
         G`IsNatural := true;
-        // The adjacency (Hecke) matrix is class_number x class_number and built by
-        // p-neighbour walks -- an O(class_number^2) cost that dominates fill for
-        // moderate class numbers at high rank (a single rank-8 class-~300 genus can take
-        // hours).  Gate it on adjlimit, a much lower cap than sizelimit; the class number
-        // is still recorded, and pneighbors below is emitted only when the matrix exists.
-        have_adjacency := (n eq s) and ((adjlimit le 0) or (#reps le adjlimit));
+        // The adjacency (Hecke) matrix walks the p-neighbour graph: each of the #reps
+        // representatives has ~p^(n-2) p-neighbours (the isotropic lines in L/pL), each
+        // needing an isometry test.  So the work is ~ #reps * sum_p p^(n-2), which grows
+        // as p^(n-2) with rank -- a single rank-12 genus costs 16x a rank-8 one even at
+        // class number 1.  We estimate that work and skip the matrix past adjlimit (a
+        // work budget), an adaptive cutoff that captures both the rank and class-number
+        // dependence, rather than a crude cap on either alone.  The class number is still
+        // recorded, and pneighbors below is emitted only when the matrix exists.
+        adj_work := #reps * (&+[Integers() | p^Maximum(n-2, 0) : p in hecke_primes(n)]);
+        have_adjacency := (n eq s) and ((adjlimit le 0) or (adj_work le adjlimit));
         if have_adjacency then
+          adj_ok := true;
           for p in hecke_primes(n) do
             vprintf FillGenus, 1 : "%o:", p;
-            vtime FillGenus, 1 : Ap := AdjacencyMatrix(G,p);
+            // Bound the adjacency computation: it is an uninterruptible builtin that can
+            // run for well over a minute on a single high-rank genus, so it needs the
+            // HardKill watchdog.  If it overruns we drop the (optional) Hecke data for
+            // this genus -- the class number is already recorded -- rather than let a few
+            // genera dominate wall-clock.
+            adj_success, adj_out, adj_elapsed := TimeoutCall(timeout, adjacency_matrix_of, <G, p>, 1 : HardKill := true);
+            if not adj_success then
+                vprintf FillGenus, 1 : "(timed out after ~%os, skipping Hecke data)\n", timeout;
+                adj_ok := false;
+                break;
+            end if;
+            Ap := adj_out[1];
+            vprintf FillGenus, 1 : "computed in %o seconds\n", adj_elapsed;
             fpf := Factorization(CharacteristicPolynomial(Ap));
             hecke_mats[p] := Ap;
             hecke_polys[p] := [(<Coefficients(pair[1]), pair[2]>) : pair in fpf];
           end for;
-          vprintf FillGenus, 1 : "Done!\n";
-          advanced["adjacency_matrix"] := to_postgres(hecke_mats);
-          advanced["adjacency_polynomials"] := to_postgres(hecke_polys);
+          if adj_ok then
+            vprintf FillGenus, 1 : "Done!\n";
+            advanced["adjacency_matrix"] := to_postgres(hecke_mats);
+            advanced["adjacency_polynomials"] := to_postgres(hecke_polys);
+          else
+            have_adjacency := false;   // no Hecke data -> the pneighbors block below is skipped
+          end if;
         end if;
     else
         reps := [];
@@ -363,7 +285,18 @@ either running for hours or going missing.}
         lat["aut_label"] := "\\N";
         lat["aut_group"] := "\\N";
         lat["is_chiral"] := "\\N";
+        // Orbit-method provenance: this lattice is the orthogonal complement of
+        // orthogonal_complement (a vector) inside the lattice with counter
+        // ambient_lattice in the genus ambient_genus (see genera_advanced).  The
+        // vector lives in the first lattice up the parent chain for which a Gram
+        // matrix is available; \N when the class came from a p-neighbour walk or
+        // the parent genus has no recorded label/counters.
+        lat["ambient_lattice"] := "\\N";
         lat["orthogonal_complement"] := "\\N";
+        if orth_prov cmpne 0 and orth_prov[1] ne "" and Li le #orth_prov[2] and orth_prov[2][Li][1] gt 0 then
+            lat["ambient_lattice"] := orth_prov[2][Li][1];
+            lat["orthogonal_complement"] := orth_prov[2][Li][2];
+        end if;
         lat["density"] := "\\N";
         lat["hermite"] := "\\N";
         lat["kissing"] := "\\N";
@@ -555,9 +488,17 @@ either running for hours or going missing.}
 
     SetColumns(0);
     for idx->L in lats do
-        // Need label for lattice.
+        // Need label for lattice.  counter records this sort position explicitly, so
+        // cross-genus references (ambient_lattice in child genera) can point at it.
         lats[idx]["label"] := Sprintf("%o.%o", basics["label"], idx);
+        lats[idx]["counter"] := idx;
     end for;
+    // Persist the finished genus (reps in counter order) to the on-disk orth cache:
+    // in rank-descending orchestration the genera of the next-lower rank descend
+    // from these lattices and resolve their ambient_lattice counters against them.
+    if (n eq s) and (#lats gt 0) then
+        WriteGenusOrthCache(basics["label"], [lat["lattice"] : lat in lats]);
+    end if;
 
     if #lats gt 0 then
         SetHashes(~lats, ~advanced, theta_elapsed, timeout);
@@ -575,8 +516,6 @@ either running for hours or going missing.}
     // genus being processed.  So we write the hash function used to a separate file
     // so that it can be looked up when needed (see lookup_hash_function in connect_genus.m)
     Write(LabelPath("genera_hash", n, s, IntegerToString(advanced["genus_hash"]) : Create), advanced["hash_function"] : Overwrite);
-
-    // TODO: Compute ambient_lattice
 
     for idx->L in lats do
         lat := L;
