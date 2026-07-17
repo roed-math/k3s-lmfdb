@@ -212,11 +212,24 @@ Two structural notes that make cutoffs safer than they look:
 4. `lmfdb_lattice_enum.jl`: `m = parse(Int, first(x[1]))` (first character of the
    codomain label) in the prim_emb filename — same ≥ rank 10 problem; the filename
    doesn't need the rank at all.
-5. The `ok` flag returned by the `_safe` functions is discarded.  If `ok=false` can
-   mean "gave up / not computed" (vs "no embeddings"), we must record it as
-   incompleteness, not as absence — **ask Stevell** (top question for the call).
+5. ~~The `ok` flag returned by the `_safe` functions is discarded.~~  Resolved by
+   reading the Oscar source: the `_safe` functions end with
+   `return !isempty(results), results`, so `ok` just means "found any" and
+   discarding it is fine.  **But** probing known-true embeddings per stratum
+   exposed a real Oscar bug behind the fast path: the unimodular route silently
+   loses even sublattices of ODD unimodular lattices
+   (`primitive_embeddings(I2, <2>)` returns `(false, [])` although `Z(1,1)` is
+   such an embedding), while the generic machinery answers the same pair
+   correctly — even→even, odd→odd and even→odd coprime/generic all check out.
+   `driver.jl`'s dispatcher therefore routes even-domain → odd-unimodular pairs
+   through `_primitive_embeddings_generic_safe`; report the fast-path bug
+   upstream (Oscar issue) and to Stevell.
 6. Appends open/close the output file once per row; fine at his scale, wasteful at
    ours — buffered per-unit writes in the wrapper.
+6b. The `Vector{ZZGenus}` wrapper `_primitive_embeddings_lmfdb(G1s, G2s, path)`
+   crashes: it `append!`s the per-genus method's return value, which is `nothing`
+   (results go through `save_data_lmfdb`).  The driver loops the per-genus method
+   directly instead.
 7. `label_top` in the overlat loop is undefined if no class matches by isometry
    (would crash with `UndefVarError`); make it a hard error with context.
 8. Multiplicity-0 k3 rows: `_embeddings_in_K3_lattice` writes a row even when the

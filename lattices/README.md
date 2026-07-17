@@ -28,18 +28,25 @@ pipe-separated columns of the corresponding records.
    `lattice_basic_data/`, `lattice_hashes/`, `genera_advanced/`.  Guarded by
    `--enum-masslimit/-timeout/-timelimit/-sizelimit/-adjlimit` so pathological
    genera are bounded rather than hanging.
-3. **Embeddings** (Julia/Oscar, planned; see
-   [`oscar/INTEGRATION_PLAN.md`](oscar/INTEGRATION_PLAN.md)): prime-index
-   overlattices, corank-1 primitive embeddings, and primitive-embedding counts
-   into the K3 lattice, producing `lat_inclusions`.
-4. **Tensor products** (Magma, [`run_tensor.m`](run_tensor.m)).
-5. **Names** (Magma, [`run_basic_names.m`](run_basic_names.m)): atomic lattice
+3. **Tensor products** (Magma, [`run_tensor.m`](run_tensor.m)).
+4. **Names** (Magma, [`run_basic_names.m`](run_basic_names.m)): atomic lattice
    names, merged across workers.
-6. **Connect** (Magma, [`connect_genus.m`](connect_genus.m) via
+5. **Connect** (Magma, [`connect_genus.m`](connect_genus.m) via
    [`run_connect_genus.m`](run_connect_genus.m), two passes): everything that
    needs data across genera — duals, orthogonal decompositions, geometric
    invariants, names, and the universality/regularity columns (see below).
    Writes `lattice_advanced_data/`.
+6. **Embeddings** (Julia/Oscar, [`oscar/driver.jl`](oscar/driver.jl) under GNU
+   parallel; design in [`oscar/INTEGRATION_PLAN.md`](oscar/INTEGRATION_PLAN.md)):
+   prime-index overlattices, corank-1 primitive embeddings (rank n → n+1) and
+   primitive-embedding counts into the K3 lattice, from the fill outputs only —
+   no database connection.  Writes raw data under `inclusions/` and assembles
+   `lat_inclusions.tbl` via [`oscar/write_table.jl`](oscar/write_table.jl).
+   Runs last (it is the slowest optional stage); controlled by the `--embed-*`
+   flags (task list, det cap, class-number cap, worker count, per-job timeout —
+   the corank-1 task is quadratic in the number of genera per rank, so start
+   with a small `--embed-max-disc-ratio`).  Skipped with a warning if the
+   Julia/Oscar environment is not set up.
 
 A small end-to-end run:
 
