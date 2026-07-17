@@ -123,7 +123,7 @@ function represents_all_values(L, values, theta, prec, tail_seconds)
     if #tail eq 0 then
         return true, true;
     end if;
-    success, res, _ := TimeoutCall(tail_seconds * #tail, FirstNonRepresentedValue, <L, tail>, 2);
+    success, res, _ := TimeoutCall(tail_seconds * #tail, FirstNonRepresentedValue, <L, tail>, 2 : HardKill := true);
     if not success then
         return false, false;                               // budget exhausted: undecided
     end if;
@@ -362,15 +362,17 @@ end intrinsic;
 
 intrinsic LatticeUniversalityData(L::Lat : Theta := [], TailSeconds := 10, MaxNodes := 10000000,
                                             MaxSeconds := 120, TotalSeconds := 600, Aut := 0)
-    -> BoolElt, RngIntElt, BoolElt, RngIntElt
+    -> BoolElt, RngIntElt, BoolElt, BoolElt, RngIntElt, BoolElt
 {The universality and even_universality columns (largest n such that every, resp.
-every even, positive definite rank-n lattice embeds in L), each as <decided, value>.
-Positive claims use the S1/S2/S8 criterion ladder plus the I_m override (Ko); upper
-bounds come from explicitly non-embedded witnesses.  A value is only decided when
-the proven lower bound meets a witness upper bound; anything else stays undecided
-(stored as null, pending the db-relative closure pass over lat_inclusions).  Aut is
-the automorphism group of L in basis coordinates (connect passes the stored one);
-if absent it is computed, budgeted, the first time an embedding search needs it.}
+every even, positive definite rank-n lattice embeds in L), each as a triple
+<defined, value, proved>.  proved means the value is a theorem: the criterion
+ladder (S1/S2/S8, plus Ko's I_m values) meets a witness upper bound.  When only
+one side is available the value is a heuristic -- the largest k whose entire
+witness pool provably embeds -- stored with proved = false, to be refined by the
+db-relative closure pass over lat_inclusions.  defined = false means not even a
+heuristic is available (budgets exhausted); store null.  Aut is the automorphism
+group of L in basis coordinates (connect passes the stored one); if absent it is
+computed, budgeted, the first time an embedding search needs it.}
     require IsPositiveDefinite(GramMatrix(L)) : "universality machinery is for positive definite lattices";
     u_dec, u_val, eu_dec, eu_val := flags_internal(L, Theta, TailSeconds);
     ladder_deadline := Cputime() + TotalSeconds;
@@ -383,21 +385,22 @@ if absent it is computed, budgeted, the first time an embedding search needs it.
                     or (eu_dec and eu_val);
     if needs_search and A cmpeq 0 then
         okA, resA, _ := TimeoutCall(60, AutomorphismGroupFaster,
-                                    <LatticeWithGram(ChangeRing(GramMatrix(L), Integers()) : CheckPositive := false)>, 1);
+                                    <LatticeWithGram(ChangeRing(GramMatrix(L), Integers()) : CheckPositive := false)>, 1
+                                    : HardKill := true);
         if okA then
             A := resA[1];
         end if;
     end if;
 
-    Udec := false;  Uval := 0;
+    Udef := false;  Uval := 0;  Uproved := false;
     if u_dec and not u_val then
-        Udec := true;                                      // not even 1-universal
+        Udef := true;  Uproved := true;                    // not even 1-universal
     elif u_dec and u_val then
         if In_override then
             // Ko: I_{n+3} is n-universal for n <= 5; E6 never embeds in I_m, so 5 caps
-            Udec := true;  Uval := Min(Rank(L) - 3, 5);
+            Udef := true;  Uval := Min(Rank(L) - 3, 5);  Uproved := true;
         elif Rank(L) lt 5 then
-            Udec := true;  Uval := 1;                      // 2-universal needs rank >= 5
+            Udef := true;  Uval := 1;  Uproved := true;    // 2-universal needs rank >= 5
         else
             lower := 1;
             upper := -1;                                   // -1 = no upper bound yet
@@ -416,12 +419,17 @@ if absent it is computed, budgeted, the first time an embedding search needs it.
                 end if;
             end for;
             if not all2 then
-                Udec := true;  Uval := 1;
-            elif not unk2 then
+                Udef := true;  Uval := 1;  Uproved := true;
+            elif unk2 then
+                // S2 undecidable within budget: universal but 2-universality open
+                Udef := true;  Uval := 1;  Uproved := false;
+            else
                 lower := 2;
+                heur := 2;                                 // largest k with a fully-embedded pool
+                heur_stuck := false;
                 for k in [3..9] do
                     if Cputime() gt ladder_deadline then
-                        break;
+                        heur_stuck := true;  break;
                     end if;
                     k_all_decided_true := true;
                     for g in WitnessGrams(k) do
@@ -439,6 +447,11 @@ if absent it is computed, budgeted, the first time an embedding search needs it.
                     if upper ne -1 then
                         break;
                     end if;
+                    if k_all_decided_true and not heur_stuck then
+                        heur := k;
+                    else
+                        heur_stuck := true;                // a gap: stop advancing the heuristic
+                    end if;
                     if k eq 8 and k_all_decided_true then
                         // the rank-8 pool contains S8 = {I8, E8} and every member
                         // embeds: 8-universal by Oh's criterion
@@ -447,33 +460,49 @@ if absent it is computed, budgeted, the first time an embedding search needs it.
                 end for;
                 if upper ne -1 then
                     assert upper ge lower;                 // proven-lower witnesses embed
-                    if upper eq lower then
-                        Udec := true;  Uval := lower;
-                    end if;
+                end if;
+                if upper ne -1 and upper eq lower then
+                    Udef := true;  Uval := lower;  Uproved := true;
+                else
+                    // heuristic: every rank-<=heur witness embeds (and heur <= upper
+                    // when an upper bound exists, since heur stops before a failure)
+                    Udef := true;  Uval := Max(lower, heur);  Uproved := false;
                 end if;
             end if;
         end if;
     end if;
 
-    EUdec := false;  EUval := 0;
+    EUdef := false;  EUval := 0;  EUproved := false;
     if eu_dec and not eu_val then
-        EUdec := true;                                     // not even even-1-universal
+        EUdef := true;  EUproved := true;                  // not even even-1-universal
     elif eu_dec and eu_val then
-        // no even 2-criterion set is known, so 1 is the best provable lower bound;
-        // decided exactly when some even binary witness provably fails to embed
+        // no even 2-criterion set is known (Ji--Kim--Oh 2021), so 1 is the best
+        // provable value; if every even binary witness embeds, report the
+        // heuristic value 2 for the closure pass to refine
+        even_unknown := false;
+        even_failed := false;
         for g in EvenBinaryWitnessGrams() do
             if Cputime() gt ladder_deadline then
-                break;
+                even_unknown := true;  break;
             end if;
             dec, rep := RepresentsLattice(L, LatticeWithGram(g) : MaxNodes := MaxNodes,
                                           MaxSeconds := MaxSeconds, Aut := A);
             if dec and not rep then
-                EUdec := true;  EUval := 1;  break;
+                even_failed := true;  break;
+            elif not dec then
+                even_unknown := true;
             end if;
         end for;
+        if even_failed then
+            EUdef := true;  EUval := 1;  EUproved := true;
+        elif even_unknown then
+            EUdef := true;  EUval := 1;  EUproved := false;
+        else
+            EUdef := true;  EUval := 2;  EUproved := false;
+        end if;
     end if;
 
-    return Udec, Uval, EUdec, EUval;
+    return Udef, Uval, Uproved, EUdef, EUval, EUproved;
 end intrinsic;
 
 intrinsic RankOneIrregularityWitness(thetas::SeqEnum, i::RngIntElt) -> RngIntElt

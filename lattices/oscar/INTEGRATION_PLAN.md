@@ -289,16 +289,20 @@ L); n-universal requires rank ≥ n+3 for n ≤ 5 (Oh, PAMS 128), giving cheap
 short-circuits; **no even-2-criterion set exists** (Ji–Kim–Oh, J. Korean Math. Soc.
 58 (2021) classify rank-5 even-2-universal candidates with 20 of 55 still unproven).
 
-Exact-value logic for the smallint columns: maintain `lower` = largest n *proven*
-via the S₁ → S₂ → S₈ ladder, and `upper` = smallest k with an explicitly
-non-represented rank-(k+1) witness (pool: I_k, ⟨1,…,1,7⟩ — the complement of any
-I_{k−1} ↪ I_m is unimodular hence I_{m−k+1}, and 7 is not a sum of three squares —
-A_k, D_k, E₆/E₇/E₈, A₁^k, [2,1,4]-type even binaries).  Store the value iff
-lower = upper, else `\N`.  Everything stored is a theorem; nothing is a guess.
-Curated override: L ≅ I_m (detected by norm-1 vectors spanning) has universality
-min(m−3, 5) for m ≥ 4 — Ko 1937 (I_{n+3} is n-universal for n ≤ 5) plus the
-classical fact that norm-2 vectors of Zᵐ generate only A/D root systems, so E₆
-never embeds and the value caps at 5.
+Value logic for the smallint columns (paired with the booleans
+`universality_proved` / `even_universality_proved` / `regularity_proved`):
+maintain `lower` = largest n *proven* via the S₁ → S₂ → S₈ ladder, and `upper` =
+smallest k with an explicitly non-represented rank-(k+1) witness (pool: I_k,
+⟨1,…,1,7⟩ — the complement of any I_{k−1} ↪ I_m is unimodular hence I_{m−k+1},
+and 7 is not a sum of three squares — A_k, D_k, E₆/E₇/E₈, A₁^k, [2,1,4]-type even
+binaries).  When lower = upper the value is stored with `proved = true` (a
+theorem).  Otherwise the column holds the best *heuristic* — the largest k whose
+entire witness pool provably embeds — with `proved = false`, and the Layer-3
+closure pass refines it against the actual embedding data.  Null means not even a
+heuristic survived the budgets.  Curated override: L ≅ I_m (detected by norm-1
+vectors spanning) has universality min(m−3, 5) for m ≥ 4, proved — Ko 1937
+(I_{n+3} is n-universal for n ≤ 5) plus the classical fact that norm-2 vectors of
+Zᵐ generate only A/D root systems, so E₆ never embeds and the value caps at 5.
 
 `RepresentsLattice(L, M)`: exact embedding test by depth-first search — vectors of
 prescribed norm via `ShortVectors`, subsequent basis vectors with prescribed inner
@@ -328,11 +332,11 @@ into L.  The genus-representation half is rigorous (the closure path is a witnes
 embedding), but "L misses M" is only closure-relative — each candidate is finished
 off by a `RepresentsLattice(L, M)` exhaustion in Magma, whose decided-false output
 makes the counterexample a theorem (that combination is how regularity values
-beyond h = 1 get decided); (b) reports db-verified universality/regularity lower
-bounds + coverage dets for curation.  **Decision needed (call/David): do
-db-verified-but-not-proven values go into the columns with a knowl caveat, into
-side columns (e.g. `universality_verified_det`), or stay in reports?**  The initial
-implementation stores only theorems and leaves `\N` otherwise.
+beyond h = 1 get decided); (b) upgrades the heuristic values in the columns —
+db-verified coverage raises `universality`/`even_universality`/`regularity` with
+`*_proved = false`, and matching witness upper bounds flip `*_proved` to true.
+(Resolved 2026-07-17: heuristics go in the value columns; the `*_proved` booleans
+record which values are theorems.)
 
 ### Smoke-run findings (2026-07-16, `run_all.py -R 4 -D 120` locally)
 
@@ -366,6 +370,7 @@ stored theta and aut_group strings):
   also need theta precision 580, which the stored series (~150) lacks — extended
   via the budgeted `ThetaSeriesIncremental`, leaving `\N` when the budget runs out.
 - Call questions: (i) is relying on the unpublished Bhargava–Hanke 290 proof
-  acceptable for `is_even_universal` (knowl footnote)?  (ii) Layer-3 storage
-  semantics above.  (iii) should `universality` for even lattices be 0 (they miss
-  ⟨1⟩) or `\N`-by-convention?  Currently 0, which is what the schema wording implies.
+  acceptable for `is_even_universal` (knowl footnote)?  (ii) ~~Layer-3 storage
+  semantics~~ resolved via the `*_proved` columns.  (iii) should `universality`
+  for even lattices be 0 (they miss ⟨1⟩) or `\N`-by-convention?  Currently 0,
+  which is what the schema wording implies.

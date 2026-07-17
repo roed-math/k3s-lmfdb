@@ -44,32 +44,32 @@ assert udec and not uval;
 for tup in [* <StandardLattice(3), 0>, <StandardLattice(4), 1>, <StandardLattice(5), 2>,
              <StandardLattice(6), 3>, <StandardLattice(7), 4>, <StandardLattice(8), 5>,
              <StandardLattice(9), 5>, <StandardLattice(12), 5>, <E8, 0> *] do
-    udec, uval, eudec, euval := LatticeUniversalityData(tup[1]);
-    assert udec and uval eq tup[2];
+    udef, uval, uproved := LatticeUniversalityData(tup[1]);
+    assert udef and uval eq tup[2] and uproved;
 end for;
 
 // a universal rank-4 lattice that is not I_4: 2-universality is impossible below
 // rank 5, so the value is decided to be exactly 1
-udec, uval := LatticeUniversalityData(LatticeWithGram(DiagonalMatrix(Integers(), [1, 1, 1, 3])));
-assert udec and uval eq 1;
+udef, uval, uproved := LatticeUniversalityData(LatticeWithGram(DiagonalMatrix(Integers(), [1, 1, 1, 3])));
+assert udef and uval eq 1 and uproved;
 
 // E8 perp I8 represents S8 = {I8, E8}, hence is 8-universal (Oh); it cannot be
 // 9-universal because its only norm-1 axes are the eight in the I8 factor, so the
 // I9 witness fails and the value is decided to be exactly 8
-udec, uval := LatticeUniversalityData(DirectSum(E8, StandardLattice(8)));
-assert udec and uval eq 8;
+udef, uval, uproved := LatticeUniversalityData(DirectSum(E8, StandardLattice(8)));
+assert udef and uval eq 8 and uproved;
 
 // ---- even_universality
-_, _, eudec, euval := LatticeUniversalityData(Lattice("A", 2));
-assert eudec and euval eq 0;                                      // misses 4
-_, _, eudec, euval := LatticeUniversalityData(Lattice("D", 4));
-assert eudec and euval eq 1;                                      // [2,1,4] witness fails
-_, _, eudec, euval := LatticeUniversalityData(StandardLattice(4));
-assert eudec and euval eq 1;                                      // norm-2 vectors of I4 pair evenly with norm-4
+_, _, _, eudef, euval, euproved := LatticeUniversalityData(Lattice("A", 2));
+assert eudef and euval eq 0 and euproved;                         // misses 4
+_, _, _, eudef, euval, euproved := LatticeUniversalityData(Lattice("D", 4));
+assert eudef and euval eq 1 and euproved;                         // [2,1,4] witness fails
+_, _, _, eudef, euval, euproved := LatticeUniversalityData(StandardLattice(4));
+assert eudef and euval eq 1 and euproved;                         // norm-2 vectors of I4 pair evenly with norm-4
 // E8 embeds every witness in the pool, and no even 2-criterion set exists, so the
-// value must stay undecided
-_, _, eudec, euval := LatticeUniversalityData(E8);
-assert not eudec;
+// value is the heuristic 2 with the proved flag off
+_, _, _, eudef, euval, euproved := LatticeUniversalityData(E8);
+assert eudef and euval eq 2 and not euproved;
 
 // ---- RankOneIrregularityWitness on synthetic genus theta data
 thetas := [[1, 0, 1, 0, 1], [1, 0, 1, 1, 1]];

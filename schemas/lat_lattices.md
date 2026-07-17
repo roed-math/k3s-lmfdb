@@ -80,10 +80,13 @@ Label: `dimension.signature.determinant.genus_spec.tiebreaker` where
 | dual_conway_symbol | text | the Conway symbol for the rescaled dual lattice |
 | is_universal | boolean | whether the quadratic form represents all positive integers (only for definite lattices) |
 | is_even_universal | boolean | whether the quadratic form represents all positive even integers (only for definite lattices) |
-| is_regular | boolean | whether the quadratic form represents all positive integers represented by its genus (only for definite lattices) |
-| universality | smallint | the largest positive integer n so that every positive definite lattice of rank n embeds in this lattice (only for definite lattices) |
-| even_universality | smallint | the largest positive integer n so that every even positive definite lattice of rank n embeds in this lattice (only for definite lattices) |
-| regularity | smallint | the largest positive integer n so that every positive definite quadratic form of rank n that embeds in this genus embeds in this lattice (only for definite lattices) |
+| is_regular | boolean | whether the quadratic form represents all positive integers represented by its genus (only for definite lattices; heuristic when regularity_proved is false) |
+| universality | smallint | the largest positive integer n so that every positive definite lattice of rank n embeds in this lattice (only for definite lattices; when universality_proved is false this is a heuristic value, verified against finite witness pools and embedding data rather than proved) |
+| universality_proved | boolean | whether the value of universality is a theorem (criterion sets for n = 1, 2, 8 together with an explicitly non-embedded rank n+1 witness), as opposed to a heuristic (only for definite lattices) |
+| even_universality | smallint | the largest positive integer n so that every even positive definite lattice of rank n embeds in this lattice (only for definite lattices; when even_universality_proved is false this is a heuristic value, verified against finite witness pools and embedding data rather than proved) |
+| even_universality_proved | boolean | whether the value of even_universality is a theorem (the doubled 290-theorem criterion for n = 1 together with an explicitly non-embedded even binary witness), as opposed to a heuristic; no even 2-universality criterion is known, so values >= 2 are currently never proved (only for definite lattices) |
+| regularity | smallint | the largest positive integer n so that every positive definite quadratic form of rank n that embeds in this genus embeds in this lattice (only for definite lattices; when regularity_proved is false this is a heuristic value, verified up to a finite bound rather than proved) |
+| regularity_proved | boolean | whether the value of regularity is a theorem (class number 1, or an explicit non-represented witness that a genus mate represents), as opposed to a heuristic (only for definite lattices) |
 | is_indecomposable | boolean | whether the lattice is (orthogonally) indecomposable |
 | is_additively_indecomposable | boolean | whether the lattice is additively indecomposable |
 | orthogonal_factors | text[] | the orthogonal decomposition of the lattice (given as a duplicate-free list of lattice labels, sorted in reverse by multiplicity, then by label) |

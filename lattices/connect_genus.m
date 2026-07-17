@@ -826,24 +826,40 @@ two-pass connect in run_all.py).}
                     autg := 0;
                 end try;
             end if;
-            udec, uval, eudec, euval := LatticeUniversalityData(L : Theta := genus_thetas[i], Aut := autg,
-                                                                TotalSeconds := Max(60, to_per_rep));
-            if udec then
+            udef, uval, uproved, eudef, euval, euproved :=
+                LatticeUniversalityData(L : Theta := genus_thetas[i], Aut := autg,
+                                        TotalSeconds := Max(60, to_per_rep));
+            if udef then
                 lat["universality"] := uval;
+                lat["universality_proved"] := uproved;
             end if;
-            if eudec then
+            if eudef then
                 lat["even_universality"] := euval;
+                lat["even_universality_proved"] := euproved;
             end if;
             if #lats eq 1 then
                 // genus-representation means representation by some class, so a
                 // class number 1 lattice is regular at every rank up to its own
                 lat["is_regular"] := true;
                 lat["regularity"] := n;
+                lat["regularity_proved"] := true;
             else
                 wit := RankOneIrregularityWitness(genus_thetas, i);
                 if wit gt 0 then
                     lat["is_regular"] := false;
                     lat["regularity"] := 0;
+                    lat["regularity_proved"] := true;
+                else
+                    // No counterexample within the common theta precision.  With
+                    // decent precision that is good heuristic evidence of rank-1
+                    // regularity; the closure pass over lat_inclusions refines the
+                    // value upward and RepresentsLattice exhaustions can prove it.
+                    B := Min([#t : t in genus_thetas]) - 1;
+                    if B ge 100 then
+                        lat["is_regular"] := true;
+                        lat["regularity"] := 1;
+                        lat["regularity_proved"] := false;
+                    end if;
                 end if;
             end if;
         end if;
