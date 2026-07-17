@@ -450,30 +450,18 @@ either running for hours or going missing.}
             if theta_prec gt 0 then
                 lat["theta_series"] := theta;
                 lat["theta_prec"] := theta_prec;
-                if lat["is_even"] eq "T" then
-                    lat["is_universal"] := false;
-                    lat["is_even_universal"] := "\\N";
-                    // 15 theorem
-                    for m in [2..Min(30,#theta-1) by 2] do
-                        if theta[m+1] eq 0 then
-                            lat["is_even_universal"] := false;
-                            break;
-                        end if;
-                    end for;
-                    if lat["is_even_universal"] cmpeq "\\N" and #theta ge 31 then
-                        lat["is_even_universal"] := true;
-                    end if;
-                else
-                    // 290 theorem
-                    for m in [1..Min(290,#theta-1)] do
-                        if theta[m+1] eq 0 then
-                            lat["is_universal"] := false;
-                            break;
-                        end if;
-                    end for;
-                    if lat["is_universal"] cmpeq "\\N" and #theta ge 291 then
-                        lat["is_universal"] := true;
-                    end if;
+                // 15-theorem for is_universal, doubled 290-theorem for
+                // is_even_universal (sources, and why 2*S290 is needed even for odd
+                // lattices, in universality.m).  The previous scan certified
+                // is_even_universal from theta support on 2..30, which is only valid
+                // for doubly even lattices.  Norms beyond theta_prec are checked by
+                // a TimeoutCall-guarded first-vector search; undecided stays "\N".
+                udec, uval, eudec, euval := UniversalityFlags(L : Theta := theta);
+                if udec then
+                    lat["is_universal"] := uval;
+                end if;
+                if eudec then
+                    lat["is_even_universal"] := euval;
                 end if;
             else
                 lat["theta_series"] := [1];

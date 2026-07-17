@@ -767,6 +767,17 @@ two-pass connect in run_all.py).}
     if #lats gt 0 then
         to_per_rep := timeout div #lats + 1;
     end if;
+    // Theta coefficient lists for every class in the genus: the rank-1 regularity
+    // scan needs all classmates at once, and the universality ladder reuses the
+    // stored series instead of recomputing them.
+    genus_thetas := [];
+    if definite then
+        theta_col := Index(basic_format, "theta_series");
+        for j in [1..#lats] do
+            pieces := Split(Split(Read(LabelPath("lattice_basic_data", lats[j]["label"])), "\n")[1], "|");
+            Append(~genus_thetas, [Integers() | StringToInteger(x) : x in ParsePGList(pieces[theta_col])]);
+        end for;
+    end if;
 
     for i in [1..#lats] do
         lat := lats[i];
@@ -800,13 +811,42 @@ two-pass connect in run_all.py).}
         // dual_theta_series / dual_theta_prec are computed and stored in FillGenus
         // (lat_basic.format), so they are not recomputed here.
 
-        lat["is_regular"] := "\\N";
-        lat["universality"] := "\\N";
-        lat["even_universality"] := "\\N";
-        lat["regularity"] := "\\N";
-
-        // TODO (David): use theta series to guess is_regular
-        // TODO (David): use embedding data to compute universality, even_universality, regularity
+        // Criterion-set layer of universality/regularity (definite only); the
+        // db-relative layer runs once the Oscar embedding stage has produced
+        // lat_inclusions (oscar/INTEGRATION_PLAN.md section 10).  Values the
+        // intrinsics cannot decide keep the "\N" defaults set above.
+        if definite then
+            // The stored automorphism group (computed in FillGenus on the same gram)
+            // lets the embedding searches collapse their top level to orbits.
+            autg := 0;
+            if lat["aut_group"] ne "\\N" then
+                try
+                    autg := StringToGroup(lat["aut_group"]);
+                catch e
+                    autg := 0;
+                end try;
+            end if;
+            udec, uval, eudec, euval := LatticeUniversalityData(L : Theta := genus_thetas[i], Aut := autg,
+                                                                TotalSeconds := Max(60, to_per_rep));
+            if udec then
+                lat["universality"] := uval;
+            end if;
+            if eudec then
+                lat["even_universality"] := euval;
+            end if;
+            if #lats eq 1 then
+                // genus-representation means representation by some class, so a
+                // class number 1 lattice is regular at every rank up to its own
+                lat["is_regular"] := true;
+                lat["regularity"] := n;
+            else
+                wit := RankOneIrregularityWitness(genus_thetas, i);
+                if wit gt 0 then
+                    lat["is_regular"] := false;
+                    lat["regularity"] := 0;
+                end if;
+            end if;
+        end if;
 
         if scale eq 1 then
             lat["primitive_scaling"] := "\\N";
