@@ -197,6 +197,30 @@ def build_embedding_inputs(fname):
     if labels_dir.is_dir():
         shutil.rmtree(labels_dir)
     labels_dir.mkdir()
+    # Exclusion lists for the completeness certificates (oscar/refine_universality.py):
+    # a definite genus inside the det window that is NOT part of the embedding
+    # universe caps the certified range below its det.
+    included = {r: {lab for lab, _, _, _ in recs} for r, recs in by_rank.items()}
+    for r in ranks():
+        base = Path("genera_basic", str(r), str(r))       # definite: nplus == rank
+        if not base.is_dir():
+            continue
+        base_cap = C // r
+        lines = []
+        for f in base.glob("*"):
+            pieces = f.read_text().split("\n")[0].split("|")
+            rec = dict(zip(basic_fmt, pieces))
+            det = abs(int(rec["disc_abs"]))
+            if det > base_cap:
+                continue
+            lab = rec["label"]
+            if lab in included.get(r, ()):
+                continue
+            reason = ("no_advanced" if not Path("genera_advanced", str(r), str(r), lab).exists()
+                      else "classlimit")
+            lines.append(f"{lab}|{det}|{reason}")
+        if lines:
+            (labels_dir / f"rank{r}_excluded.txt").write_text("\n".join(lines) + "\n")
     files = {}
     for r, recs in by_rank.items():
         base_cap = C // r
@@ -284,7 +308,7 @@ def clean_outputs():
     targets = ["genera_advanced", "genera_hash", "lattice_basic_data",
                "lattice_advanced_data", "lattice_hashes", "voronoi", "shortest",
                "orth_cache",   # stale cached genera would leak old counters/labels into provenance
-               "inclusions", "embed_labels"]
+               "inclusions", "embed_labels", "refine_sidecar"]
     if not args.skip_list_genera:
         targets.append("genera_basic")   # regenerated below; otherwise it is this run's input
     removed = []
@@ -354,6 +378,59 @@ def main():
                           f"warmlimit:={args.warm_limit}",
                           "labels:={1}", "run_fill_genus.m"])
 
+    if not args.skip_embeddings:
+        # Julia/Oscar embedding stage (oscar/INTEGRATION_PLAN.md): overlattices,
+        # corank-1 primitive embeddings and K3-embedding counts, assembled into
+        # lat_inclusions.tbl.  Needs only the fill outputs, and runs last so the
+        # slowest optional stage cannot delay the core tables.
+        ecount = build_embedding_inputs("embed_jobs.txt")
+        if ecount == 0:
+            print("No embedding jobs in range; skipping embeddings", flush=True)
+        elif not check_oscar():
+            print("WARNING: Julia/Oscar environment not ready (setup: lattices/README.md); skipping embeddings", flush=True)
+        else:
+            with timed(f"Computing embeddings ({ecount} jobs)"):
+                parallel("embed_jobs.txt", "embed.joblog",
+                         ["--task", "{1}", "--labels-file", "{2}", "--labels-file2", "{3}",
+                          "--data-root", ".", "--out-root", "inclusions"],
+                         colsep=":", prog=["julia", "--project=oscar", "oscar/driver.jl"],
+                         jobs=args.embed_jobs, timeout=args.embed_timelimit, env=julia_env())
+            with timed("Writing lat_inclusions.tbl"):
+                subprocess.run(["julia", "--startup-file=no", "oscar/write_table.jl",
+                                "--inclusions-root", "inclusions",
+                                "--out", "lat_inclusions.tbl",
+                                "--lattice-root", "lattice_basic_data"], env=julia_env())
+
+    # Bottom-up bitset pass over the embedding poset (oscar/refine_universality.py):
+    # give the rank-n lattices distinct powers of two, OR the masks up the corank-1
+    # and overlattice edges, then record per-lattice sidecars for connect: db-relative
+    # heuristic values (all-ones = n-universal over the coverage window, mask equals
+    # the genus OR = n-regular), certified universality upper bounds, and regularity
+    # candidate counterexamples.  Certificates come from the drivers' completion
+    # manifests plus the exclusion lists: a cleanly finished job certifies its whole
+    # det window, making closure-absence SOUND for corank-1 pairs inside it (their
+    # chains cannot leave the window, since overlattice steps only lower the det), so
+    # those candidates skip the Magma confirmation that connect runs for the rest.
+    if not args.skip_embeddings and Path("lat_inclusions.tbl").exists():
+        with timed("Deriving embedding-poset sidecars for connect"):
+            sys.path.insert(0, "oscar")
+            import refine_universality as _refine
+            _lats = _refine.read_meta_lattice_dir("lattice_basic_data")
+            _edges = _refine.read_inclusions("lat_inclusions.tbl", _lats)
+            _C = args.embed_max_disc_ratio or args.max_disc_ratio
+            _flags, _cands, _mmd = _refine.closure_flags(_lats, _edges, disc_ratio=_C)
+            _ranks = sorted({m.rank for m in _lats.values() if m.definite})
+            _certs = _refine.derive_certificates("embed_labels", "inclusions/manifests", _C, _ranks)
+            _resolved = _refine.resolve_candidates(_cands, _lats, _certs)
+            if Path("refine_sidecar").is_dir():
+                shutil.rmtree("refine_sidecar")
+            nsc = _refine.write_sidecars("refine_sidecar", _lats, _flags, _mmd, _resolved, _certs)
+            Path("regularity_candidates.txt").write_text(
+                "".join(f"{l}\t{n}\t{s0}\n" for l, n, s0 in _cands))
+            _np = sum(1 for v in _resolved.values() for c in v if c[2] == "p")
+            print(f"  wrote {nsc} sidecar records; {len(_cands)} candidates "
+                  f"({_np} certificate-proven)", flush=True)
+
     if not args.skip_tensor:
         tcount = build_tensor_inputs("tensor_jobs.txt")
         with timed(f"Computing tensor products ({tcount} tasks)"):
@@ -411,51 +488,6 @@ def main():
             parallel("genus_jobs.txt", "connect2.joblog",
                      ["labels:={1}", "phase:=2", "run_connect_genus.m"])
 
-    if not args.skip_embeddings:
-        # Julia/Oscar embedding stage (oscar/INTEGRATION_PLAN.md): overlattices,
-        # corank-1 primitive embeddings and K3-embedding counts, assembled into
-        # lat_inclusions.tbl.  Needs only the fill outputs, and runs last so the
-        # slowest optional stage cannot delay the core tables.
-        ecount = build_embedding_inputs("embed_jobs.txt")
-        if ecount == 0:
-            print("No embedding jobs in range; skipping embeddings", flush=True)
-        elif not check_oscar():
-            print("WARNING: Julia/Oscar environment not ready (setup: lattices/README.md); skipping embeddings", flush=True)
-        else:
-            with timed(f"Computing embeddings ({ecount} jobs)"):
-                parallel("embed_jobs.txt", "embed.joblog",
-                         ["--task", "{1}", "--labels-file", "{2}", "--labels-file2", "{3}",
-                          "--data-root", ".", "--out-root", "inclusions"],
-                         colsep=":", prog=["julia", "--project=oscar", "oscar/driver.jl"],
-                         jobs=args.embed_jobs, timeout=args.embed_timelimit, env=julia_env())
-            with timed("Writing lat_inclusions.tbl"):
-                subprocess.run(["julia", "--startup-file=no", "oscar/write_table.jl",
-                                "--inclusions-root", "inclusions",
-                                "--out", "lat_inclusions.tbl",
-                                "--lattice-root", "lattice_basic_data"], env=julia_env())
-
-    # Bottom-up bitset pass over the embedding poset (oscar/refine_universality.py):
-    # give the rank-n lattices distinct powers of two, OR the masks up the corank-1
-    # and overlattice edges, then test n-universality (mask is all ones over the
-    # coverage window) and n-regularity (mask equals the bitwise OR over the genus).
-    # Raise-only into the heuristic (proved = false) columns; proved values are never
-    # touched, and mask deficits become candidate counterexamples for a Magma
-    # RepresentsLattice confirmation pass (written to regularity_candidates.txt).
-    if not args.skip_embeddings and Path("lat_inclusions.tbl").exists() \
-            and Path("lattice_advanced_data").is_dir():
-        with timed("Refining universality/regularity up the embedding poset"):
-            sys.path.insert(0, "oscar")
-            import refine_universality as _refine
-            _lats = _refine.read_meta_lattice_dir("lattice_basic_data")
-            _edges = _refine.read_inclusions("lat_inclusions.tbl", _lats)
-            _flags, _cands = _refine.closure_flags(
-                _lats, _edges, disc_ratio=(args.embed_max_disc_ratio or args.max_disc_ratio))
-            seen, changed = _refine.apply_to_advanced(
-                _lats, _flags, "lattice_advanced_data", "lat_advanced.format")
-            Path("regularity_candidates.txt").write_text(
-                "".join(f"{l}\t{n}\t{s}\n" for l, n, s in _cands))
-            print(f"  updated {changed} of {seen} advanced records; "
-                  f"{len(_cands)} regularity candidates recorded", flush=True)
 
 if __name__ == "__main__":
     main()

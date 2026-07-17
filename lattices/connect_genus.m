@@ -862,6 +862,86 @@ two-pass connect in run_all.py).}
                     end if;
                 end if;
             end if;
+
+            // Embedding-poset sidecar, written by run_all's refine step from
+            // lat_inclusions (oscar/refine_universality.py): db-relative heuristic
+            // raises, certified universality upper bounds, and regularity candidate
+            // counterexamples.  Certificate-proven candidates ("p") apply directly;
+            // unresolved ones ("u") get a budgeted RepresentsLattice exhaustion here,
+            // where the lattice and its automorphism group are already in hand.
+            // proved = true values from the criterion layer are never overwritten.
+            sc := LabelPath("refine_sidecar", lat["label"]);
+            if OpenTest(sc, "r") then
+                scf := SplitPipe(Split(Read(sc), "\n")[1]);   // empties preserved (cands may be empty)
+                // label|db_universality|db_even_universality|db_regularity|universality_upper|cands
+                for pair in [<"universality", 2>, <"even_universality", 3>, <"regularity", 4>] do
+                    col := pair[1];
+                    dbv := StringToInteger(scf[pair[2]]);
+                    if dbv ge 1 and lat[col * "_proved"] cmpne true then
+                        cur := lat[col] cmpeq "\\N" select -1 else lat[col];
+                        if dbv gt cur then
+                            lat[col] := dbv;
+                            lat[col * "_proved"] := false;
+                            if col eq "regularity" then
+                                lat["is_regular"] := true;
+                            end if;
+                        end if;
+                    end if;
+                end for;
+                if scf[5] ne "\\N" and lat["universality_proved"] cmpne true then
+                    // provably not uu-universal (certified-complete slice with a
+                    // certified missing source): cap the value; it becomes proved
+                    // when the cap meets a proven lower bound (0 needs nothing,
+                    // 1 needs the 15-theorem flag)
+                    uu := StringToInteger(scf[5]);
+                    cur := lat["universality"] cmpeq "\\N" select uu - 1 else lat["universality"];
+                    newv := Max(Min(cur, uu - 1), 0);
+                    lat["universality"] := newv;
+                    if newv eq 0 or (newv eq 1 and lat["is_universal"] eq "true") then
+                        lat["universality_proved"] := true;
+                    else
+                        lat["universality_proved"] := false;
+                    end if;
+                end if;
+                if #scf ge 6 and #scf[6] gt 0 then
+                    minpn := 0;         // smallest n with a proven/confirmed missing source
+                    confirmations := 0;
+                    for centry in Split(scf[6], ";") do
+                        if minpn gt 0 then break; end if;     // entries sorted by n
+                        cp := Split(centry, ",");
+                        cn := StringToInteger(cp[1]);
+                        if cp[3] eq "p" then
+                            minpn := cn;
+                        elif confirmations lt 3 then
+                            confirmations +:= 1;
+                            Mrec := Split(Split(Read(LabelPath("lattice_basic_data", cp[2])), "\n")[1], "|");
+                            ML := GramStringToLat(Mrec[Index(basic_format, "gram")],
+                                                  StringToInteger(Split(cp[2], ".")[1]));
+                            cdec, crep := RepresentsLattice(L, ML : Aut := autg,
+                                                            MaxSeconds := 30, MaxNodes := 2000000);
+                            if cdec and not crep then
+                                minpn := cn;
+                            elif cdec and crep then
+                                vprintf ConnectGenus, 1 : "closure gap: %o does embed in %o\n",
+                                        cp[2], lat["label"];
+                            end if;
+                        end if;
+                    end for;
+                    if minpn gt 0 and lat["regularity_proved"] cmpne true then
+                        // a lattice its genus represents provably does not embed:
+                        // not minpn-regular
+                        if minpn eq 1 then
+                            lat["is_regular"] := false;
+                            lat["regularity"] := 0;
+                            lat["regularity_proved"] := true;
+                        else
+                            cur := lat["regularity"] cmpeq "\\N" select minpn - 1 else lat["regularity"];
+                            lat["regularity"] := Min(cur, minpn - 1);
+                            lat["regularity_proved"] := false;
+                        end if;
+                    end if;
+                end if;
+            end if;
         end if;
 
         if scale eq 1 then

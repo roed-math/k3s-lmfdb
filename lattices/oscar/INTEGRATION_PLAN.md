@@ -351,6 +351,25 @@ db-verified coverage raises `universality`/`even_universality`/`regularity` with
 (Resolved 2026-07-17: heuristics go in the value columns; the `*_proved` booleans
 record which values are theorems.)
 
+Architecture as implemented (2026-07-17): the refine step runs between the
+embedding stage and connect, computes the bitset closure (each rank-n lattice a
+power of two, masks OR-ed up the poset; all-ones = db-relative n-universal, mask
+= genus-OR = n-regular), and writes per-lattice **sidecars**
+(`refine_sidecar/<r>/<s>/<label>`); **connect is the single writer** of the
+columns, merging criterion values, sidecar heuristics, certified universality
+upper bounds, and candidate resolutions.  **Completeness certificates**: each
+driver job writes a completion manifest (only on clean finish, listing
+loader-skips), and together with `embed_labels/rank*_excluded.txt` these certify
+det windows per task and rank.  Inside a certified window, closure-absence is
+SOUND for corank-1 pairs (overlattice steps only lower the det, so those chains
+cannot leave the window) — such candidates are marked proven ("p") and skip the
+Magma check; higher-corank candidates stay "u" and get a budgeted
+`RepresentsLattice` exhaustion in connect (3 per lattice, 30s each).  Certified
+missing sources also yield proven not-n-universal upper bounds.  Validated:
+closure all-ones at rank 1 agreed with the 15-theorem's `is_universal` on 25/25
+lattices, and a certificate-proven missing pair (I₃ ↛ 4.4.10.b3.2) was confirmed
+by an independent exhaustion.
+
 ### Smoke-run findings (2026-07-16, `run_all.py -R 4 -D 120` locally)
 
 Two **pre-existing** blockers surfaced while validating the wiring end-to-end

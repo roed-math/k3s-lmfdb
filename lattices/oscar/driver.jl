@@ -191,6 +191,24 @@ function main()
     else
         error("unknown task $task (expected overlat, k3 or corank1)")
     end
+    # Completion manifest: written only when the job ran to the end, so its
+    # presence certifies that every loaded genus of this job was fully processed.
+    # The loader's skipped labels are recorded so the certificate derivation
+    # (oscar/refine_universality.py) can cap the certified det range below the
+    # smallest skipped genus.
+    mkpath(joinpath(out, "manifests"))
+    mname = string(task, "_", replace(basename(opts["labels-file"]), ".txt" => ""), ".done")
+    open(joinpath(out, "manifests", mname), "w") do f
+        write(f, "task=$task loaded=$(length(Gs)) skipped=$(n_skipped)\n")
+        for s in skipped
+            write(f, s, "\n")
+        end
+        if task == "corank1"
+            for s in skipped2
+                write(f, s, "\n")
+            end
+        end
+    end
     println("DONE task=$task genera=$(length(Gs)) skipped=$(n_skipped)")
 end
 

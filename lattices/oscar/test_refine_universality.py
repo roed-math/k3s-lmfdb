@@ -83,7 +83,7 @@ def main():
         assert any("univ[1]: det<=2 (3/4)" in l for l in lines), lines
 
         # ---- bitset flags + apply-to-advanced
-        flags, cands2 = closure_flags(lats, edges)
+        flags, cands2, mmd = closure_flags(lats, edges)
         assert flags["2.2.9.a.1"][1] == {"all_full": True, "even_full": True,
                                          "genus_full": True}, flags["2.2.9.a.1"]
         assert not flags["2.2.1.a.1"][1]["all_full"]           # misses <3>
@@ -91,6 +91,7 @@ def main():
         assert flags["2.2.64.a.1"][1]["genus_full"]            # P holds the genus OR
         assert not flags["2.2.64.a.2"][1]["genus_full"]        # Q misses <3>
         assert ("2.2.64.a.2", 1, "1.1.3.a.1") in cands2
+        assert mmd[("2.2.1.a.1", 1)] == 3              # smallest missing source of I2 is <3>
 
         fmt_path = Path(d) / "lat_advanced.format"
         fmt_path.write_text(ADV_FMT + "\n")

@@ -155,6 +155,7 @@ def closure_flags(lats, edges, max_source_rank=None, disc_ratio=None):
     max_source_rank = max_source_rank or (max(ranks) - 1 if len(ranks) > 1 else 0)
     flags = defaultdict(dict)
     candidates = []
+    missing_min_det = {}
     for n in [r for r in ranks if r <= max_source_rank]:
         cap = None if disc_ratio is None else disc_ratio // n
         reach, sources = reach_from_rank(n, order, edges, lats, det_cap=cap)
@@ -165,6 +166,7 @@ def closure_flags(lats, edges, max_source_rank=None, disc_ratio=None):
         for i, lab in enumerate(sources):
             if lats[lab].is_even:
                 even_mask |= 1 << i
+        det_order = sorted(range(len(sources)), key=lambda i: lats[sources[i]].disc_abs)
         genus_or = {}
         for g, labs in by_genus.items():
             acc = 0
@@ -180,12 +182,132 @@ def closure_flags(lats, edges, max_source_rank=None, disc_ratio=None):
                 "even_full": even_mask != 0 and bits & even_mask == even_mask,
                 "genus_full": bits == genus_or[m.genus_label],
             }
+            if bits & full != full:
+                for i in det_order:
+                    if not bits >> i & 1:
+                        missing_min_det[(m.label, n)] = lats[sources[i]].disc_abs
+                        break
             missing = genus_or[m.genus_label] & ~bits
             while missing:
                 i = (missing & -missing).bit_length() - 1
                 candidates.append((m.label, n, sources[i]))
                 missing &= missing - 1
-    return flags, candidates
+    return flags, candidates, missing_min_det
+
+
+def label_det(label):
+    """Genus and lattice labels are r.nplus.det.... , so the det is the third piece."""
+    return int(label.split(".")[2])
+
+
+def derive_certificates(embed_labels_dir, manifests_dir, disc_ratio, ranks):
+    """Completeness certificates from job manifests + exclusion lists.
+
+    A driver job writes its manifest only on clean completion, and its
+    computation enumerates ALL embeddings for the pairs it loaded (Nikulin
+    machinery), so the certified bound for a task at source rank n is the
+    largest B such that every definite rank-n genus with det <= B was included
+    (not excluded by build_embedding_inputs, not skipped by the loader) and the
+    covering job completed.  Returns {("overlat", n) | ("c1dom", n) |
+    ("c1cod", n): B} with B = -1 when nothing is certified.
+    """
+    certs = {}
+    excl_min = {}
+    for n in ranks:
+        cap = disc_ratio // n
+        m = cap + 1
+        p = Path(embed_labels_dir) / f"rank{n}_excluded.txt"
+        if p.is_file():
+            for line in p.read_text().splitlines():
+                lab, det, _ = line.split("|")
+                m = min(m, int(det))
+        excl_min[n] = m                              # smallest hole in the universe
+    def manifest_bound(name, want_ranks):
+        p = Path(manifests_dir) / name
+        if not p.is_file():
+            return {r: -1 for r in want_ranks}       # job did not complete: nothing certified
+        bound = {r: excl_min.get(r, 0) - 1 for r in want_ranks}
+        for line in p.read_text().splitlines()[1:]:
+            lab = line.strip()
+            if not lab:
+                continue
+            r = int(lab.split(".")[0])
+            if r in bound:
+                bound[r] = min(bound[r], label_det(lab) - 1)   # loader skipped it
+        return bound
+    for n in ranks:
+        certs[("overlat", n)] = manifest_bound(f"overlat_rank{n}_all.done", [n])[n]
+        b = manifest_bound(f"corank1_rank{n}_all.done", [n, n + 1])
+        certs[("c1dom", n)] = b[n]
+        certs[("c1cod", n + 1)] = b[n + 1]
+    return certs
+
+
+def resolve_candidates(candidates, lats, certs):
+    """Split candidates into proven-missing (certificate-backed) and unresolved.
+
+    Sound only for corank 1: the closure detects M -> L through overlattice steps
+    (det only decreases, so chains stay inside a certified window) followed by one
+    corank-1 edge; if the rank-n overlattice data and the (n, n+1) corank-1 data
+    are certified past det(M) and det(L), a missing closure path proves M does not
+    embed in L.  Higher-corank candidates keep flag "u" for the Magma
+    RepresentsLattice confirmation in connect.
+    """
+    out = defaultdict(list)                          # label -> [(n, src, flag)]
+    for lab, n, src in candidates:
+        flag = "u"
+        L, M = lats[lab], lats[src]
+        if L.rank == n + 1:
+            b = min(certs.get(("overlat", n), -1), certs.get(("c1dom", n), -1))
+            bc = certs.get(("c1cod", n + 1), -1)
+            if M.disc_abs <= b and L.disc_abs <= bc:
+                flag = "p"
+        out[lab].append((n, src, flag))
+    return out
+
+
+def write_sidecars(out_root, lats, flags, missing_min_det, resolved, certs, max_cands=8):
+    """One record per definite lattice with anything to say, LabelPath-sharded:
+
+        label|db_universality|db_even_universality|db_regularity|universality_upper|cands
+
+    where cands = "n,source,flag;..." (flag p = proven missing by a certificate,
+    u = needs a RepresentsLattice confirmation), sorted by (n, source det) and
+    capped at max_cands, and universality_upper = n means "provably not
+    n-universal" (a certified-complete rank-n slice with a missing source of
+    certified det).  Consumed by ConnectGenus, which is the single writer of the
+    final columns.
+    """
+    def contiguous(fl, key):
+        n = 0
+        while fl.get(n + 1, {}).get(key):
+            n += 1
+        return n
+    root = Path(out_root)
+    written = 0
+    for m in lats.values():
+        if not m.definite:
+            continue
+        fl = flags.get(m.label, {})
+        cands = sorted(resolved.get(m.label, ()),
+                       key=lambda c: (c[0], label_det(c[1])))[:max_cands]
+        db_u, db_e, db_r = (contiguous(fl, k) for k in ("all_full", "even_full", "genus_full"))
+        upper = "\\N"
+        n = m.rank - 1
+        if n >= 1 and n in fl and not fl[n]["all_full"]:
+            b = min(certs.get(("overlat", n), -1), certs.get(("c1dom", n), -1))
+            md = missing_min_det.get((m.label, n))
+            if md is not None and md <= b and m.disc_abs <= certs.get(("c1cod", m.rank), -1):
+                upper = str(n)
+        if not (db_u or db_e or db_r or cands or upper != "\\N"):
+            continue
+        d = root / str(m.rank) / str(m.nplus)
+        d.mkdir(parents=True, exist_ok=True)
+        cstr = ";".join(f"{n},{src},{flag}" for n, src, flag in cands)
+        (d / m.label).write_text(
+            f"{m.label}|{db_u}|{db_e}|{db_r}|{upper}|{cstr}\n")
+        written += 1
+    return written
 
 
 APPLY_COLS = ("is_regular", "universality", "universality_proved", "even_universality",
@@ -335,7 +457,7 @@ def main():
             else read_meta_tsv(args.meta_tsv))
     edges = read_inclusions(args.inclusions, lats)
     if args.apply:
-        flags, cands = closure_flags(lats, edges, args.max_source_rank, args.disc_ratio)
+        flags, cands, _ = closure_flags(lats, edges, args.max_source_rank, args.disc_ratio)
         adv = args.advanced_dir or str(Path(args.lattice_dir).parent / "lattice_advanced_data")
         fmt = args.format or str(Path(args.lattice_dir).parent / "lat_advanced.format")
         seen, changed = apply_to_advanced(lats, flags, adv, fmt)
