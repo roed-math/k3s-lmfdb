@@ -434,5 +434,28 @@ def main():
                                 "--out", "lat_inclusions.tbl",
                                 "--lattice-root", "lattice_basic_data"], env=julia_env())
 
+    # Bottom-up bitset pass over the embedding poset (oscar/refine_universality.py):
+    # give the rank-n lattices distinct powers of two, OR the masks up the corank-1
+    # and overlattice edges, then test n-universality (mask is all ones over the
+    # coverage window) and n-regularity (mask equals the bitwise OR over the genus).
+    # Raise-only into the heuristic (proved = false) columns; proved values are never
+    # touched, and mask deficits become candidate counterexamples for a Magma
+    # RepresentsLattice confirmation pass (written to regularity_candidates.txt).
+    if not args.skip_embeddings and Path("lat_inclusions.tbl").exists() \
+            and Path("lattice_advanced_data").is_dir():
+        with timed("Refining universality/regularity up the embedding poset"):
+            sys.path.insert(0, "oscar")
+            import refine_universality as _refine
+            _lats = _refine.read_meta_lattice_dir("lattice_basic_data")
+            _edges = _refine.read_inclusions("lat_inclusions.tbl", _lats)
+            _flags, _cands = _refine.closure_flags(
+                _lats, _edges, disc_ratio=(args.embed_max_disc_ratio or args.max_disc_ratio))
+            seen, changed = _refine.apply_to_advanced(
+                _lats, _flags, "lattice_advanced_data", "lat_advanced.format")
+            Path("regularity_candidates.txt").write_text(
+                "".join(f"{l}\t{n}\t{s}\n" for l, n, s in _cands))
+            print(f"  updated {changed} of {seen} advanced records; "
+                  f"{len(_cands)} regularity candidates recorded", flush=True)
+
 if __name__ == "__main__":
     main()

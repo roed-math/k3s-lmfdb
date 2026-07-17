@@ -11,7 +11,8 @@ import io
 import tempfile
 from pathlib import Path
 
-from refine_universality import LatMeta, analyze, read_inclusions, read_meta_tsv
+from refine_universality import (LatMeta, analyze, apply_to_advanced, closure_flags,
+                                 read_inclusions, read_meta_tsv)
 
 META = """\
 1.1.1.a.1\t1\t1\t1\tF
@@ -19,6 +20,7 @@ META = """\
 1.1.3.a.1\t1\t1\t3\tF
 1.1.4.a.1\t1\t1\t4\tT
 2.2.1.a.1\t2\t2\t1\tF
+2.2.9.a.1\t2\t2\t9\tF
 2.2.64.a.1\t2\t2\t64\tF
 2.2.64.a.2\t2\t2\t64\tF
 """
@@ -33,7 +35,17 @@ text|text|boolean|integer[]|smallint|smallint|smallint|integer|numeric[]|numeric
 1.1.1.a.1|2.2.64.a.1|T|{}|1|2|1|1|{64}|{}|{}
 1.1.3.a.1|2.2.64.a.1|T|{}|1|2|1|1|{}|{}|{}
 1.1.1.a.1|2.2.64.a.2|T|{}|1|2|1|1|{64}|{}|{}
+1.1.1.a.1|2.2.9.a.1|T|{}|1|2|1|1|{9}|{}|{}
+1.1.2.a.1|2.2.9.a.1|T|{}|1|2|1|1|{}|{}|{}
+1.1.3.a.1|2.2.9.a.1|T|{}|1|2|1|1|{}|{}|{}
+1.1.4.a.1|2.2.9.a.1|T|{}|1|2|1|1|{}|{}|{}
 """
+
+ADV_FMT = "label|is_regular|universality|universality_proved|even_universality|even_universality_proved|regularity|regularity_proved"
+
+def adv_record(label, **kw):
+    vals = {c: kw.get(c, "\\N") for c in ADV_FMT.split("|")[1:]}
+    return "|".join([label] + [vals[c] for c in ADV_FMT.split("|")[1:]]) + "\n"
 
 
 def main():
@@ -44,7 +56,7 @@ def main():
         tbl_path.write_text(TBL)
 
         lats = read_meta_tsv(meta_path)
-        assert len(lats) == 7
+        assert len(lats) == 8
         edges = read_inclusions(tbl_path, lats)
 
         lines = []
@@ -69,6 +81,45 @@ def main():
 
         # sanity on the report text
         assert any("univ[1]: det<=2 (3/4)" in l for l in lines), lines
+
+        # ---- bitset flags + apply-to-advanced
+        flags, cands2 = closure_flags(lats, edges)
+        assert flags["2.2.9.a.1"][1] == {"all_full": True, "even_full": True,
+                                         "genus_full": True}, flags["2.2.9.a.1"]
+        assert not flags["2.2.1.a.1"][1]["all_full"]           # misses <3>
+        assert flags["2.2.1.a.1"][1]["even_full"]              # has <2>, <4>
+        assert flags["2.2.64.a.1"][1]["genus_full"]            # P holds the genus OR
+        assert not flags["2.2.64.a.2"][1]["genus_full"]        # Q misses <3>
+        assert ("2.2.64.a.2", 1, "1.1.3.a.1") in cands2
+
+        fmt_path = Path(d) / "lat_advanced.format"
+        fmt_path.write_text(ADV_FMT + "\n")
+        adv = Path(d) / "advanced"
+        for lab, kw in [
+            # Y: universality and regularity should be raised; even_universality is
+            # proved and must NOT be touched despite the even_full flag
+            ("2.2.9.a.1", dict(even_universality="0", even_universality_proved="true")),
+            # P: heuristic regularity should be raised to 1
+            ("2.2.64.a.1", dict()),
+            # Q: nothing to raise (genus_full false, all_full false)
+            ("2.2.64.a.2", dict()),
+        ]:
+            m = lats[lab]
+            pdir = adv / str(m.rank) / str(m.nplus)
+            pdir.mkdir(parents=True, exist_ok=True)
+            (pdir / lab).write_text(adv_record(lab, **kw))
+        seen, changed = apply_to_advanced(lats, flags, adv, fmt_path, report=lines.append)
+        assert (seen, changed) == (3, 2), (seen, changed)      # X has no record; Y and P change
+        fields = dict(zip(ADV_FMT.split("|"),
+                          (adv / "2" / "2" / "2.2.9.a.1").read_text().strip().split("|")))
+        assert fields["universality"] == "1" and fields["universality_proved"] == "false"
+        assert fields["even_universality"] == "0" and fields["even_universality_proved"] == "true"
+        assert fields["regularity"] == "1" and fields["is_regular"] == "true"
+        fields = dict(zip(ADV_FMT.split("|"),
+                          (adv / "2" / "2" / "2.2.64.a.1").read_text().strip().split("|")))
+        assert fields["regularity"] == "1" and fields["universality"] == "\\N"
+        q = (adv / "2" / "2" / "2.2.64.a.2").read_text().strip().split("|")
+        assert all(x == "\\N" for x in q[1:]), q
 
     print("refine_universality synthetic test: OK")
 

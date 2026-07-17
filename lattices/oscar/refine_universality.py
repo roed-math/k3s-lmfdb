@@ -107,13 +107,18 @@ def toposort(lats):
                   key=lambda m: (m.rank, -m.disc_abs, m.label))
 
 
-def reach_from_rank(n, order, edges, lats, even_only=False):
+def reach_from_rank(n, order, edges, lats, even_only=False, det_cap=None):
     """For every definite lattice, the set of rank-n sources reaching it.
 
-    Returns {label: frozen bitset (python int)} plus the source index map.
-    Processes in topological order; memory is one |sources|-bit int per node.
+    Sources are the definite rank-n lattices, each assigned a distinct power of
+    two (optionally only even ones, optionally capped at det <= det_cap so the
+    tests speak about exactly the range the embedding stage covered); masks are
+    OR-ed up the embedding poset in topological order.  Returns
+    {label: bitset (python int)} plus the source list.  Memory is one
+    |sources|-bit int per node, one source rank at a time.
     """
-    sources = [m.label for m in order if m.rank == n and (not even_only or m.is_even)]
+    sources = [m.label for m in order if m.rank == n and (not even_only or m.is_even)
+               and (det_cap is None or m.disc_abs <= det_cap)]
     src_bit = {lab: 1 << i for i, lab in enumerate(sources)}
     reach = {}
     for m in order:
@@ -124,6 +129,126 @@ def reach_from_rank(n, order, edges, lats, even_only=False):
                 bits |= src_bit[dom]
         reach[m.label] = bits
     return reach, sources
+
+
+def closure_flags(lats, edges, max_source_rank=None, disc_ratio=None):
+    """The three bitset tests, per definite lattice and source rank n:
+
+      all_full   -- mask over the rank-n sources is all ones: every rank-n lattice
+                    in the universe embeds (the db-relative n-universality test)
+      even_full  -- the same restricted to even sources
+      genus_full -- mask equals the bitwise OR of the masks over the lattice's
+                    genus: everything the genus receives, the lattice receives
+                    (the db-relative n-regularity test; the genus side is
+                    witness-backed, so a strict inequality names candidate
+                    counterexamples for a RepresentsLattice confirmation)
+
+    disc_ratio caps the rank-n source universe at det <= disc_ratio // n, matching
+    the embedding stage's coverage convention.  Returns ({label: {n: flag dict}},
+    candidates) with candidates = [(label, n, missing source label)].
+    """
+    order = toposort(lats)
+    by_genus = defaultdict(list)
+    for m in order:
+        by_genus[m.genus_label].append(m.label)
+    ranks = sorted({m.rank for m in order})
+    max_source_rank = max_source_rank or (max(ranks) - 1 if len(ranks) > 1 else 0)
+    flags = defaultdict(dict)
+    candidates = []
+    for n in [r for r in ranks if r <= max_source_rank]:
+        cap = None if disc_ratio is None else disc_ratio // n
+        reach, sources = reach_from_rank(n, order, edges, lats, det_cap=cap)
+        if not sources:
+            continue
+        full = (1 << len(sources)) - 1
+        even_mask = 0
+        for i, lab in enumerate(sources):
+            if lats[lab].is_even:
+                even_mask |= 1 << i
+        genus_or = {}
+        for g, labs in by_genus.items():
+            acc = 0
+            for x in labs:
+                acc |= reach[x]
+            genus_or[g] = acc
+        for m in order:
+            if m.rank <= n:
+                continue
+            bits = reach[m.label]
+            flags[m.label][n] = {
+                "all_full": bits & full == full,
+                "even_full": even_mask != 0 and bits & even_mask == even_mask,
+                "genus_full": bits == genus_or[m.genus_label],
+            }
+            missing = genus_or[m.genus_label] & ~bits
+            while missing:
+                i = (missing & -missing).bit_length() - 1
+                candidates.append((m.label, n, sources[i]))
+                missing &= missing - 1
+    return flags, candidates
+
+
+APPLY_COLS = ("is_regular", "universality", "universality_proved", "even_universality",
+              "even_universality_proved", "regularity", "regularity_proved")
+
+
+def apply_to_advanced(lats, flags, advanced_root, format_path, report=print):
+    """Patch the db-relative heuristics into lattice_advanced_data records.
+
+    Raise-only, and proved values are never touched: a `*_proved = true` value is a
+    theorem from the criterion layer, and a missing bit in the closure is not a
+    disproof (chain intermediates can leave the det window), so this pass only
+    strengthens `proved = false` (or null) values.  The value written is the largest
+    n such that the test holds for every source rank 1..n.  Returns
+    (records seen, records changed).
+    """
+    fmt = Path(format_path).read_text().strip().split("|")
+    idx = {c: fmt.index(c) for c in APPLY_COLS}
+    root = Path(advanced_root)
+
+    def contiguous(fl, key):
+        n = 0
+        while fl.get(n + 1, {}).get(key):
+            n += 1
+        return n
+
+    seen = changed = 0
+    for m in lats.values():
+        if not m.definite:
+            continue
+        p = root / str(m.rank) / str(m.nplus) / m.label
+        if not p.is_file():
+            continue
+        seen += 1
+        fields = p.read_text().split("\n")[0].split("|")
+        if len(fields) != len(fmt):
+            report(f"# skipping {m.label}: advanced record has {len(fields)} fields, format has {len(fmt)}")
+            continue
+        fl = flags.get(m.label, {})
+        this = False
+
+        def raise_value(val_col, proved_col, db_val):
+            nonlocal this
+            if db_val <= 0 or fields[idx[proved_col]] == "true":
+                return
+            cur = fields[idx[val_col]]
+            cur_num = int(cur) if cur not in ("\\N", "") else -1
+            if db_val > cur_num:
+                fields[idx[val_col]] = str(db_val)
+                fields[idx[proved_col]] = "false"
+                this = True
+
+        raise_value("universality", "universality_proved", contiguous(fl, "all_full"))
+        raise_value("even_universality", "even_universality_proved", contiguous(fl, "even_full"))
+        db_r = contiguous(fl, "genus_full")
+        raise_value("regularity", "regularity_proved", db_r)
+        if this and db_r >= 1 and fields[idx["regularity_proved"]] == "false" \
+                and int(fields[idx["regularity"]]) >= 1:
+            fields[idx["is_regular"]] = "true"
+        if this:
+            p.write_text("|".join(fields) + "\n")
+            changed += 1
+    return seen, changed
 
 
 def analyze(lats, edges, max_source_rank=None, report=print):
@@ -193,12 +318,34 @@ def main():
     meta.add_argument("--lattice-dir", help="lattice_basic_data directory")
     meta.add_argument("--meta-tsv", help="TSV: label rank nplus disc_abs is_even")
     ap.add_argument("--max-source-rank", type=int, default=None)
+    ap.add_argument("--apply", action="store_true",
+                    help="patch the db-relative heuristics into --advanced-dir records "
+                         "(raise-only; proved values untouched) instead of only reporting")
+    ap.add_argument("--advanced-dir", default=None, help="lattice_advanced_data directory")
+    ap.add_argument("--format", default=None, help="lat_advanced.format path")
+    ap.add_argument("--disc-ratio", type=int, default=None,
+                    help="cap the rank-n source universe at det <= C/n (the embedding "
+                         "stage's coverage convention)")
+    ap.add_argument("--candidates-out", default=None,
+                    help="write regularity candidate counterexamples (label, rank, missing "
+                         "source) to this file for the Magma confirmation pass")
     args = ap.parse_args()
 
     lats = (read_meta_lattice_dir(args.lattice_dir) if args.lattice_dir
             else read_meta_tsv(args.meta_tsv))
     edges = read_inclusions(args.inclusions, lats)
-    analyze(lats, edges, args.max_source_rank)
+    if args.apply:
+        flags, cands = closure_flags(lats, edges, args.max_source_rank, args.disc_ratio)
+        adv = args.advanced_dir or str(Path(args.lattice_dir).parent / "lattice_advanced_data")
+        fmt = args.format or str(Path(args.lattice_dir).parent / "lat_advanced.format")
+        seen, changed = apply_to_advanced(lats, flags, adv, fmt)
+        print(f"updated {changed} of {seen} advanced records")
+        if args.candidates_out:
+            Path(args.candidates_out).write_text(
+                "".join(f"{l}\t{n}\t{s}\n" for l, n, s in cands))
+            print(f"{len(cands)} regularity candidates -> {args.candidates_out}")
+    else:
+        analyze(lats, edges, args.max_source_rank)
 
 
 if __name__ == "__main__":

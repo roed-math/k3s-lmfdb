@@ -47,6 +47,14 @@ pipe-separated columns of the corresponding records.
    the corank-1 task is quadratic in the number of genera per rank, so start
    with a small `--embed-max-disc-ratio`).  Skipped with a warning if the
    Julia/Oscar environment is not set up.
+7. **Refine** (Python, [`oscar/refine_universality.py`](oscar/refine_universality.py),
+   inline in `run_all.py`): a bottom-up bitset pass over the embedding poset —
+   each rank-n lattice gets a distinct power of two, masks are OR-ed up the
+   corank-1 and overlattice edges, and then all-ones tests db-relative
+   n-universality while mask-equals-genus-OR tests n-regularity.  Raise-only
+   into the heuristic (`*_proved = false`) columns of `lattice_advanced_data`;
+   mask deficits against the genus OR are written to `regularity_candidates.txt`
+   for a Magma `RepresentsLattice` confirmation pass.
 
 A small end-to-end run:
 
