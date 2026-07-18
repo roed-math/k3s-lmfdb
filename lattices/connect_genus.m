@@ -816,10 +816,17 @@ two-pass connect in run_all.py).}
         // lat_inclusions (oscar/INTEGRATION_PLAN.md section 10).  Values the
         // intrinsics cannot decide keep the "\N" defaults set above.
         if definite then
-            // The stored automorphism group (computed in FillGenus on the same gram)
-            // lets the embedding searches collapse their top level to orbits.
+            // The stored automorphism group lets the embedding searches collapse
+            // their top level to orbits -- but its matrices are only in the stored
+            // gram's basis when CanonicalForm succeeded in FillGenus (on a timeout,
+            // fill stores the LLL-reduced gram while the group was computed on the
+            // pre-LLL basis).  A wrong-frame group would make orbit_reps drop
+            // genuine shell vectors and could turn an incomplete search into a
+            // false non-embedding certificate, so gate on gram_is_canonical: the
+            // fallback is merely a slower in-frame recomputation inside
+            // LatticeUniversalityData, never a wrong answer.
             autg := 0;
-            if lat["aut_group"] ne "\\N" then
+            if lat["aut_group"] ne "\\N" and lat["gram_is_canonical"] eq "true" then
                 try
                     autg := StringToGroup(lat["aut_group"]);
                 catch e

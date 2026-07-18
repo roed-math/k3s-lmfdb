@@ -56,9 +56,9 @@ end function;
 
 // Rank-k lattices used to certify universality <= k-1.  <1,...,1,7> works against
 // unimodular-complement lattices: any I_{k-1} embedded in I_m has orthogonal
-// complement I_{m-k+1}, and 7 is not a sum of three squares.  The pool for k = 8
-// contains S8 = {I8, E8}, which LatticeUniversalityData exploits to raise the
-// proven lower bound to 8 when every rank-8 witness embeds.
+// complement I_{m-k+1}, and 7 is not a sum of three squares.  (The provable
+// 8-universal lower bound is checked directly against S8 = {I8, E8} in
+// LatticeUniversalityData, independent of the rest of this pool.)
 function WitnessGrams(k)
     pool := [MatrixRing(Integers(), k) ! 1];                                   // I_k
     if k ge 2 then
@@ -194,7 +194,7 @@ forward embed_search;
 // skipped once in that case.  `nodes` counts candidates tried against maxnodes.
 // Returns <status, nodes>: 1 = embedding found, 0 = exhausted (proof of
 // non-embedding), -1 = node cap hit (undecided).
-function embed_search(L, G, MG, aut, chosen, nodes, maxnodes, deadline)
+function embed_search(L, G, MG, chosen, nodes, maxnodes, deadline)
     j := #chosen;
     n := Nrows(MG);
     N := Nrows(G);
@@ -204,19 +204,9 @@ function embed_search(L, G, MG, aut, chosen, nodes, maxnodes, deadline)
     sol := 0;
     zero_is_solution := false;
     if j eq 0 then
-        if aut cmpne 0 then
-            // materialize the (smallest-norm) shell once to collapse it to
-            // Aut(L)-orbit representatives; up to sign is enough at the top level
-            // since a global sign flip preserves the Gram matrix
-            shell := [Vector(Integers(), Eltseq(v[1])) : v in ShortVectors(L, t, t)];
-            if #shell le 20000 then
-                cands := orbit_reps(aut, shell);
-            else
-                cands := shell;                            // collapse too costly; keep the list
-            end if;
-        else
-            proc := ShortVectorsProcess(L, t, t);
-        end if;
+        // the Aut-collapsed top level lives in RepresentsLattice; this path is the
+        // aut-free one, streamed lazily
+        proc := ShortVectorsProcess(L, t, t);
     else
         V := Matrix(Integers(), j, N, &cat[Eltseq(v) : v in chosen]);
         T := Transpose(V * G);                             // (v_i, y) = (y * T)_i
@@ -261,7 +251,7 @@ function embed_search(L, G, MG, aut, chosen, nodes, maxnodes, deadline)
         if j + 1 eq n then
             return 1, nodes;
         end if;
-        status, nodes := embed_search(L, G, MG, aut, Append(chosen, y), nodes, maxnodes, deadline);
+        status, nodes := embed_search(L, G, MG, Append(chosen, y), nodes, maxnodes, deadline);
         if status ne 0 then
             return status, nodes;
         end if;
@@ -310,6 +300,9 @@ vector-rich lattices.}
         // whose subtree succeeds immediately.  The probe phase has a global
         // budget of its own so that a large uncollapsed shell cannot multiply it.
         t1 := MG[1][1];
+        // un-forked C call: acceptable because the ascending-diagonal ordering puts
+        // the SMALLEST norm on top, and minimal shells are the small ones; a target
+        // with a large minimal norm would be the case to fork
         shell := [Vector(Integers(), Eltseq(v[1])) : v in ShortVectors(LG, t1, t1)];
         reps := #shell le 20000 select orbit_reps(Aut, shell) else shell;
         if n eq 1 then
@@ -322,7 +315,7 @@ vector-rich lattices.}
             if spent ge probe_total or Cputime() gt deadline then
                 break;
             end if;
-            status, used := embed_search(LG, G, MG, Aut, [y], 0, Min(probe, probe_total - spent), deadline);
+            status, used := embed_search(LG, G, MG, [y], 0, Min(probe, probe_total - spent), deadline);
             spent +:= used;
             if status eq 1 then
                 return true, true;
@@ -330,7 +323,7 @@ vector-rich lattices.}
         end for;
         nodes := 0;
         for y in reps do
-            status, nodes := embed_search(LG, G, MG, Aut, [y], nodes, MaxNodes, deadline);
+            status, nodes := embed_search(LG, G, MG, [y], nodes, MaxNodes, deadline);
             if status eq 1 then
                 return true, true;
             end if;
@@ -341,7 +334,7 @@ vector-rich lattices.}
         end for;
         return true, false;
     end if;
-    status, nodes := embed_search(LG, G, MG, 0, [], 0, MaxNodes, deadline);
+    status, nodes := embed_search(LG, G, MG, [], 0, MaxNodes, deadline);
     if status eq -1 then
         vprintf FillGenus, 1 : "RepresentsLattice: budget hit (%o nodes)\n", nodes;
         return false, false;
@@ -452,10 +445,17 @@ computed, budgeted, the first time an embedding search needs it.}
                     else
                         heur_stuck := true;                // a gap: stop advancing the heuristic
                     end if;
-                    if k eq 8 and k_all_decided_true then
-                        // the rank-8 pool contains S8 = {I8, E8} and every member
-                        // embeds: 8-universal by Oh's criterion
-                        lower := 8;
+                    if k eq 8 and upper eq -1 and lower lt 8 then
+                        // Oh's criterion needs only S8 = {I8, E8}: check them
+                        // directly so an undecided unrelated pool member (A8, D8,
+                        // ...) cannot downgrade a provable 8 to a heuristic
+                        okI, repI := RepresentsLattice(L, StandardLattice(8) :
+                                        MaxNodes := MaxNodes, MaxSeconds := MaxSeconds, Aut := A);
+                        okE, repE := RepresentsLattice(L, Lattice("E", 8) :
+                                        MaxNodes := MaxNodes, MaxSeconds := MaxSeconds, Aut := A);
+                        if okI and repI and okE and repE then
+                            lower := 8;
+                        end if;
                     end if;
                 end for;
                 if upper ne -1 then

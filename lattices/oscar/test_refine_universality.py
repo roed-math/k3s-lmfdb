@@ -12,7 +12,8 @@ import tempfile
 from pathlib import Path
 
 from refine_universality import (LatMeta, analyze, apply_to_advanced, closure_flags,
-                                 read_inclusions, read_meta_tsv)
+                                 derive_certificates, read_inclusions, read_meta_tsv,
+                                 resolve_candidates, write_sidecars)
 
 META = """\
 1.1.1.a.1\t1\t1\t1\tF
@@ -121,6 +122,58 @@ def main():
         assert fields["regularity"] == "1" and fields["universality"] == "\\N"
         q = (adv / "2" / "2" / "2.2.64.a.2").read_text().strip().split("|")
         assert all(x == "\\N" for x in q[1:]), q
+
+        # ---- negative-certificate path: certificates, candidate resolution,
+        # ---- and the certified universality upper bound in the sidecars
+        emb = Path(d) / "embed_labels"
+        man = Path(d) / "data"
+        emb.mkdir()
+        for job in ("overlat_rank1_all", "corank1_rank1_all"):
+            (man / job).mkdir(parents=True)
+            (man / job / "manifest.txt").write_text("task=x loaded=4 skipped=0\n")
+        C = 64                                             # window: rank-1 dets <= 64
+
+        # complete universe + completed jobs: everything <= 64 is certified
+        certs = derive_certificates(emb, man, C, [1, 2])
+        assert certs[("overlat", 1)] == 64 and certs[("c1dom", 1)] == 64
+        assert certs[("c1cod", 2)] == 32                   # rank-2 window is C//2
+        resolved = resolve_candidates(cands2, lats, certs)
+        assert resolved["2.2.64.a.2"] == [(1, "1.1.3.a.1", "u")], resolved
+        # det(Q) = 64 > 32 = certified codomain bound, so Q's candidate stays "u";
+        # shrink Q's det into the certified window and it flips to proven
+        lats2 = dict(lats); lats2["2.2.64.a.2"] = LatMeta("2.2.64.a.2", 2, 2, 20, False)
+        assert resolve_candidates(cands2, lats2, certs)["2.2.64.a.2"][0][2] == "p"
+
+        # an exclusion at det 3 caps the certified bound at 2: the det-3 source
+        # is no longer certified, so the candidate degrades back to "u"
+        (emb / "rank1_excluded.txt").write_text("1.1.3.a.1|3|classlimit\n")
+        certs3 = derive_certificates(emb, man, C, [1, 2])
+        assert certs3[("overlat", 1)] == 2 and certs3[("c1dom", 1)] == 2
+        assert resolve_candidates(cands2, lats2, certs3)["2.2.64.a.2"][0][2] == "u"
+        (emb / "rank1_excluded.txt").unlink()
+
+        # a loader skip recorded in the manifest caps the bound the same way
+        (man / "corank1_rank1_all" / "manifest.txt").write_text(
+            "task=corank1 loaded=3 skipped=1\n1.1.2.a.1\n")
+        certs4 = derive_certificates(emb, man, C, [1, 2])
+        assert certs4[("c1dom", 1)] == 1 and certs4[("overlat", 1)] == 64
+        # and a missing manifest certifies nothing
+        (man / "overlat_rank1_all" / "manifest.txt").unlink()
+        certs5 = derive_certificates(emb, man, C, [1, 2])
+        assert certs5[("overlat", 1)] == -1
+
+        # sidecars: with full certificates, I2 (rank 2, misses <3> at det 3 <= 64,
+        # det(I2) = 1 <= 32) gets the proven upper bound "not 1-universal"
+        sc = Path(d) / "sidecar"
+        nw = write_sidecars(sc, lats, flags, mmd, resolved, certs)
+        rec = (sc / "2" / "2" / "2.2.1.a.1").read_text().strip().split("|")
+        assert rec[4] == "1", rec                          # universality_upper = 1
+        assert nw >= 4
+        # without certificates the same lattice carries no upper bound
+        sc2 = Path(d) / "sidecar2"
+        write_sidecars(sc2, lats, flags, mmd, resolved, certs5)
+        rec2 = (sc2 / "2" / "2" / "2.2.1.a.1").read_text().strip().split("|")
+        assert rec2[4] == "\\N", rec2
 
     print("refine_universality synthetic test: OK")
 

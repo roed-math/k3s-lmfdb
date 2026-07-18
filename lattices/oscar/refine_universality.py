@@ -87,6 +87,8 @@ def read_inclusions(path, lats):
     edges = defaultdict(set)          # codomain -> set of domains (reverse edges)
     with open(path) as f:
         lines = [l.rstrip("\n") for l in f if l.strip()]
+    if len(lines) < 2:
+        return edges                  # empty table (headers only, or nothing)
     cols = lines[0].split("|")
     dom_i, cod_i = cols.index("domain"), cols.index("codomain")
     for line in lines[2:]:
@@ -102,7 +104,9 @@ def read_inclusions(path, lats):
 def toposort(lats):
     """Edges preserve (rank asc, det desc within rank): overlattice steps keep the
     rank and divide the determinant by p^2, corank-1 steps raise the rank.  Sorting
-    by (rank, -det) is therefore a topological order for the closure DP."""
+    by (rank, -det) is therefore a topological order for the closure DP.  A
+    corrupted edge violating this order would merely fail to propagate its mask --
+    a conservative under-approximation, never an over-claim."""
     return sorted((m for m in lats.values() if m.definite),
                   key=lambda m: (m.rank, -m.disc_abs, m.label))
 

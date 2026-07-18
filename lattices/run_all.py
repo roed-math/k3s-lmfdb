@@ -327,6 +327,10 @@ def clean_outputs():
 def main():
     if args.clean:
         clean_outputs()
+    if args.skip_embeddings and Path("refine_sidecar").is_dir():
+        print("WARNING: --skip-embeddings, but a refine_sidecar/ directory from an "
+              "earlier run exists; connect will consume it.  Use --clean (or delete "
+              "it) if this run's data differs from the run that produced it.", flush=True)
     if not args.skip_list_genera:
         inputs = build_genus_inputs()
         total = len(inputs)
