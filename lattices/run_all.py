@@ -396,10 +396,18 @@ def main():
                          colsep=":", prog=["julia", "--project=oscar", "oscar/driver.jl"],
                          jobs=args.embed_jobs, timeout=args.embed_timelimit, env=julia_env())
             with timed("Writing lat_inclusions.tbl"):
-                subprocess.run(["julia", "--startup-file=no", "oscar/write_table.jl",
-                                "--inclusions-root", "inclusions",
-                                "--out", "lat_inclusions.tbl",
-                                "--lattice-root", "lattice_basic_data"], env=julia_env())
+                wt = subprocess.run(["julia", "--startup-file=no", "oscar/write_table.jl",
+                                     "--inclusions-root", "inclusions",
+                                     "--out", "lat_inclusions.tbl",
+                                     "--lattice-root", "lattice_basic_data"], env=julia_env())
+                if wt.returncode != 0:
+                    # quarantine the partial table so the refine step (and anything
+                    # else keyed on its existence) does not consume a bad file
+                    if Path("lat_inclusions.tbl").exists():
+                        Path("lat_inclusions.tbl").rename("lat_inclusions.tbl.failed")
+                    print("  WARNING: lat_inclusions writer failed "
+                          "(partial output in lat_inclusions.tbl.failed); "
+                          "sidecar refinement will be skipped", flush=True)
 
     # Bottom-up bitset pass over the embedding poset (oscar/refine_universality.py):
     # give the rank-n lattices distinct powers of two, OR the masks up the corank-1
@@ -420,7 +428,7 @@ def main():
             _C = args.embed_max_disc_ratio or args.max_disc_ratio
             _flags, _cands, _mmd = _refine.closure_flags(_lats, _edges, disc_ratio=_C)
             _ranks = sorted({m.rank for m in _lats.values() if m.definite})
-            _certs = _refine.derive_certificates("embed_labels", "inclusions/manifests", _C, _ranks)
+            _certs = _refine.derive_certificates("embed_labels", "inclusions/data", _C, _ranks)
             _resolved = _refine.resolve_candidates(_cands, _lats, _certs)
             if Path("refine_sidecar").is_dir():
                 shutil.rmtree("refine_sidecar")

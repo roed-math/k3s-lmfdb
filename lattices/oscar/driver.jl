@@ -167,7 +167,17 @@ function main()
     opts = parse_args(ARGS)
     task = opts["task"]
     root = opts["data-root"]
-    out = opts["out-root"]
+    # Atomic staging: everything is written under staging/<jobtag>/ and moved to
+    # data/<jobtag>/ in one rename only after the whole job (manifest included)
+    # finished.  A killed or failed job leaves only an ignored staging directory,
+    # and a retry re-stages from scratch, so partial output is never consumed and
+    # a rerun can never append duplicate orbits into the multiplicity files.
+    jobtag = string(task, "_", replace(basename(opts["labels-file"]), ".txt" => ""))
+    stage = joinpath(opts["out-root"], "staging", jobtag)
+    committed = joinpath(opts["out-root"], "data", jobtag)
+    ispath(stage) && rm(stage; recursive = true)
+    mkpath(stage)
+    out = stage
     labels = filter(!isempty, strip.(readlines(opts["labels-file"])))
     Gs, skipped = load_genera(root, String.(labels))
     n_skipped = length(skipped)
@@ -191,14 +201,12 @@ function main()
     else
         error("unknown task $task (expected overlat, k3 or corank1)")
     end
-    # Completion manifest: written only when the job ran to the end, so its
-    # presence certifies that every loaded genus of this job was fully processed.
-    # The loader's skipped labels are recorded so the certificate derivation
+    # Completion manifest, staged with the data: its presence in data/<jobtag>/
+    # certifies that every loaded genus of this job was fully processed.  The
+    # loader's skipped labels are recorded so the certificate derivation
     # (oscar/refine_universality.py) can cap the certified det range below the
     # smallest skipped genus.
-    mkpath(joinpath(out, "manifests"))
-    mname = string(task, "_", replace(basename(opts["labels-file"]), ".txt" => ""), ".done")
-    open(joinpath(out, "manifests", mname), "w") do f
+    open(joinpath(stage, "manifest.txt"), "w") do f
         write(f, "task=$task loaded=$(length(Gs)) skipped=$(n_skipped)\n")
         for s in skipped
             write(f, s, "\n")
@@ -209,6 +217,9 @@ function main()
             end
         end
     end
+    mkpath(dirname(committed))
+    ispath(committed) && rm(committed; recursive = true)
+    mv(stage, committed)
     println("DONE task=$task genera=$(length(Gs)) skipped=$(n_skipped)")
 end
 

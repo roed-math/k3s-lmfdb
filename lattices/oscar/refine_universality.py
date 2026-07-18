@@ -203,7 +203,8 @@ def label_det(label):
 def derive_certificates(embed_labels_dir, manifests_dir, disc_ratio, ranks):
     """Completeness certificates from job manifests + exclusion lists.
 
-    A driver job writes its manifest only on clean completion, and its
+    A driver job's committed directory (inclusions/data/<jobtag>/, containing
+    manifest.txt) appears atomically on clean completion, and its
     computation enumerates ALL embeddings for the pairs it loaded (Nikulin
     machinery), so the certified bound for a task at source rank n is the
     largest B such that every definite rank-n genus with det <= B was included
@@ -223,7 +224,7 @@ def derive_certificates(embed_labels_dir, manifests_dir, disc_ratio, ranks):
                 m = min(m, int(det))
         excl_min[n] = m                              # smallest hole in the universe
     def manifest_bound(name, want_ranks):
-        p = Path(manifests_dir) / name
+        p = Path(manifests_dir) / name / "manifest.txt"
         if not p.is_file():
             return {r: -1 for r in want_ranks}       # job did not complete: nothing certified
         bound = {r: excl_min.get(r, 0) - 1 for r in want_ranks}
@@ -236,8 +237,8 @@ def derive_certificates(embed_labels_dir, manifests_dir, disc_ratio, ranks):
                 bound[r] = min(bound[r], label_det(lab) - 1)   # loader skipped it
         return bound
     for n in ranks:
-        certs[("overlat", n)] = manifest_bound(f"overlat_rank{n}_all.done", [n])[n]
-        b = manifest_bound(f"corank1_rank{n}_all.done", [n, n + 1])
+        certs[("overlat", n)] = manifest_bound(f"overlat_rank{n}_all", [n])[n]
+        b = manifest_bound(f"corank1_rank{n}_all", [n, n + 1])
         certs[("c1dom", n)] = b[n]
         certs[("c1cod", n + 1)] = b[n + 1]
     return certs
