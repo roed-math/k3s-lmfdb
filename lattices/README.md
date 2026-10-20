@@ -26,8 +26,8 @@ pipe-separated columns of the corresponding records.
    walk) — then per-lattice invariants (automorphism group, theta series,
    hashes, `is_universal`/`is_even_universal`, ...).  Writes
    `lattice_basic_data/`, `lattice_hashes/`, `genera_advanced/`.  Guarded by
-   `--enum-masslimit/-timeout/-timelimit/-sizelimit/-adjlimit` so pathological
-   genera are bounded rather than hanging.
+   `--enum-masslimit/-timeout/-timelimit/-sizelimit/-adjlimit/-per-lattice-timeout`
+   so pathological genera are bounded rather than hanging.
 3. **Tensor products** (Magma, [`run_tensor.m`](run_tensor.m)).
 4. **Names** (Magma, [`run_basic_names.m`](run_basic_names.m)): atomic lattice
    names, merged across workers.
@@ -130,14 +130,23 @@ Workers should run with `JULIA_NUM_THREADS=1`; budget a few GB of RSS each.
 
 ```sh
 cd lattices
-magma -b run_tests.m                      # everything under tests/
-magma -b target:=Universality run_tests.m # one file (substring match)
+tests/run.sh                    # the fast tests/test_*.m suites
+tests/run.sh --slow             # also test_brandhorst and test_l12a_plus (~2.5 h)
+tests/run.sh test_universality  # one suite, streaming its output
+python3 tests/test_schema_consistency.py
+python3 oscar/test_refine_universality.py
 ```
 
-Some tests fork via `TimeoutCall` and print a harmless post-success
-`bad syntax`.  Note that `TimeoutCall`'s child-side `Alarm` cannot interrupt a
-single long C-level call; pass `HardKill := true` (a watchdog that SIGKILLs the
-child) for anything that may enter one — see `Parallel.magma/TimeoutCall.m`.
+CI (`.github/workflows/tests.yml`) runs one job per Magma suite once the
+`MAGMA_URL`/`MAGMA_USERNAME`/`MAGMA_PASSWORD` repository secrets are set.
+
+A suite that calls anything forking via `TimeoutCall` must wrap its body in
+`procedure() ... end procedure();`, as the `run_*.m` drivers do: a forked
+child's exit moves the parent's read position in the script file, and the
+parent then misparses the rest of it.  Note also that `TimeoutCall`'s
+child-side `Alarm` cannot interrupt a single long C-level call; pass
+`HardKill := true` (a watchdog that SIGKILLs the child) for anything that may
+enter one — see `Parallel.magma/TimeoutCall.m`.
 
 ## Universality and regularity columns
 
