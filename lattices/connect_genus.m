@@ -181,6 +181,12 @@ intrinsic LabelPath(folder::MonStgElt, label::MonStgElt : Create := false) -> Mo
     return LabelPath(folder, rank, nplus, label : Create := Create);
 end intrinsic;
 
+function aut_preserves_gram(A, L)
+    G := ChangeRing(GramMatrix(L), Rationals());
+    return forall{g : g in Generators(A) |
+                  h * G * Transpose(h) eq G where h := ChangeRing(g, Rationals())};
+end function;
+
 intrinsic AutOrbits(L::Lat, A::GrpMat, vecs::SeqEnum) -> SeqEnum
 {Given a lattice L, an automorphism group A of L and a sequence of vectors which is invariant under the action of A (which could be LatElts or ModTupFldElts), return orbit representatives for the action of A on vecs}
     // This assumes A is in GL_n(Z), with respect to the basis of the lattice
@@ -817,21 +823,22 @@ two-pass connect in run_all.py).}
         // intrinsics cannot decide keep the "\N" defaults set above.
         if definite then
             // The stored automorphism group lets the embedding searches collapse
-            // their top level to orbits -- but its matrices are only in the stored
-            // gram's basis when CanonicalForm succeeded in FillGenus (on a timeout,
-            // fill stores the LLL-reduced gram while the group was computed on the
-            // pre-LLL basis).  A wrong-frame group would make orbit_reps drop
-            // genuine shell vectors and could turn an incomplete search into a
-            // false non-embedding certificate, so gate on gram_is_canonical: the
-            // fallback is merely a slower in-frame recomputation inside
-            // LatticeUniversalityData, never a wrong answer.
+            // their top level to orbits.  A group that does not preserve L's gram
+            // would make orbit_reps drop genuine shell vectors and could turn an
+            // incomplete search into a false non-embedding certificate.  FillGenus
+            // before 9882be0 stored such a group whenever CanonicalForm timed out,
+            // and connect can run over that older fill output, so check the frame
+            // here; the fallback is a recomputation inside LatticeUniversalityData.
             autg := 0;
-            if lat["aut_group"] ne "\\N" and lat["gram_is_canonical"] eq "true" then
+            if lat["aut_group"] ne "\\N" then
                 try
                     autg := StringToGroup(lat["aut_group"]);
                 catch e
                     autg := 0;
                 end try;
+                if Type(autg) eq GrpMat and not aut_preserves_gram(autg, L) then
+                    autg := 0;
+                end if;
             end if;
             udef, uval, uproved, eudef, euval, euproved :=
                 LatticeUniversalityData(L : Theta := genus_thetas[i], Aut := autg,
