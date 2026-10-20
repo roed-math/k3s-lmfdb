@@ -88,11 +88,16 @@ conclusive full-L negative is attempted only when rank(L) <= 5.  Values that a
 large-rank lattice's small sublattices miss are reported undecided, never guessed.}
     subs := [];
     if Rank(L) gt 5 then
-        // leading kxk block of the LLL gram = gram of the sublattice spanned by
-        // the first k (short) LLL basis vectors
+        // gram of the sublattice spanned by the k shortest LLL basis vectors.  LLL
+        // does not sort by norm: on E8 perp I8 the leading block is all E8 roots,
+        // an even sublattice that misses every odd value.
         GL := GramMatrix(LLL(L));
-        Append(~subs, LatticeWithGram(Submatrix(GL, 1, 1, 4, 4) : CheckPositive := false));
-        Append(~subs, LatticeWithGram(Submatrix(GL, 1, 1, 5, 5) : CheckPositive := false));
+        idx := [1..Rank(L)];
+        Sort(~idx, func<a, b | GL[a][a] - GL[b][b]>);
+        for k in [4, 5] do
+            Append(~subs, LatticeWithGram(Matrix(Integers(), k, k,
+                [GL[idx[i]][idx[j]] : j in [1..k], i in [1..k]]) : CheckPositive := false));
+        end for;
     end if;
     for m in values do
         if exists{K : K in subs | #ShortVectors(K, m, m : Max := 1) gt 0} then
