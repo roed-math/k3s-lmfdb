@@ -46,8 +46,12 @@ Label: `dimension.signature.determinant.genus_spec.tiebreaker` where
 | [class_number](https://beta.lmfdb.org/knowledge/show/lattice.class_number) | smallint | size of the genus |
 | [density](https://beta.lmfdb.org/knowledge/show/lattice.density) | numeric | density of the lattice centered sphere packing (only for definite lattices) |
 | [center_density](https://beta.lmfdb.org/knowledge/show/lattice.density) | numeric | density of the lattice centered sphere packing (only for definite lattices) |
-| [covering_norm](https://beta.lmfdb.org/knowledge/show/lattice.covering_radius) | integer[] | the square of the minimum real number so that balls of this radius around lattice points cover space (stored as numerator and denominator) |
-| deep_hole_count | 
+| [covering_norm_num](https://beta.lmfdb.org/knowledge/show/lattice.covering_radius) | integer | numerator of the square of the covering radius, the minimum real number so that balls of this radius around lattice points cover space |
+| [covering_norm_den](https://beta.lmfdb.org/knowledge/show/lattice.covering_radius) | integer | denominator of the square of the covering radius |
+| deep_holes | numeric[] | orbit representatives, under the action of the automorphism group, for the deep holes (the holes at maximal distance from the lattice); coordinates are rational in general |
+| deep_hole_count | bigint | the number of deep holes |
+| deep_hole_orbit_count | bigint | the number of orbits of deep holes under the automorphism group |
+| hole_count | bigint | the number of holes (the vertices of the Voronoi cells of the lattice) |
 | [hermite](https://beta.lmfdb.org/knowledge/show/lattice.hermite_number) | numeric | Hermite number (only for definite lattices) |
 | [kissing](https://beta.lmfdb.org/knowledge/show/lattice.kissing) | bigint | kissing number, the number of minimal vectors (only for definite lattices) |
 | shortest | integer[] | orbit representatives for the set of shortest vectors under the action of the automorphism group |
@@ -62,7 +66,7 @@ Label: `dimension.signature.determinant.genus_spec.tiebreaker` where
 | counter | integer | the position of this lattice within its genus (1-based), matching the sort order used to assign the label tiebreaker; ambient_lattice references in other genera point at this value |
 | ambient_lattice | integer | the counter of the lattice, within the genus recorded as ambient_genus in lat_genera, in which this lattice arises as the orthogonal complement of the vector(s) in orthogonal_complement (null when the lattice was not produced by such a descent) |
 | orthogonal_complement | integer[] | a vector or list of vectors so that this lattice is isometric to the orthogonal complement of their span, inside the lattice referenced by ambient_lattice.  When the enumeration works up a chain of genera toward a unimodular lattice, the vector is given in the first lattice along the chain for which a Gram matrix is provided |
-| [canonical_gram] | integer[] | Canonical form for the Gram matrix; currently only available for definite lattices |
+| canonical_gram | integer[] | Canonical form for the Gram matrix; currently only available for definite lattices |
 | [genus_label](https://beta.lmfdb.org/Lattice/Labels) | text | The part of the label that is constant across a genus |
 | conway_symbol | text | the Conway symbol for the genus |
 | pneighbors | jsonb | a dictionary with primes as keys and a list of labels as values (the p-neighbors) |
@@ -72,7 +76,7 @@ Label: `dimension.signature.determinant.genus_spec.tiebreaker` where
 | is_even | boolean | whether the lattice is even |
 | dual_label | text | the label for the rescaled dual lattice (may be null if the discriminant is too large) |
 | dual_theta_series | numeric[] | the theta series of the rescaled dual lattice |
-| theta_prec | integer | Absolute precision of the dual theta series |
+| dual_theta_prec | integer | Absolute precision of the dual theta series |
 | dual_hermite | numeric | the Hermite number of the rescaled dual lattice (only for definite lattices) |
 | dual_kissing | bigint | the kissing number of the rescaled dual lattice (only for definite lattices) |
 | dual_density | numeric | the center density of the rescaled dual lattice (only for definite lattices) |

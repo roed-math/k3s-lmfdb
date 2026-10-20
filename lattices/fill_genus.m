@@ -112,7 +112,7 @@ function SphereVolume(n)
     end if;
 end function;
 
-intrinsic FillGenus(label::MonStgElt : timeout := 1800, masslimit := 0, sizelimit := 0, timelimit := 0, adjlimit := 0, use_orth := true, force_orth := false)
+intrinsic FillGenus(label::MonStgElt : timeout := 1800, masslimit := 0, sizelimit := 0, timelimit := 0, adjlimit := 0, perlattice := 0, use_orth := true, force_orth := false)
 {Fill the data for a genus and its lattice representatives, given files in the genera_basic format.
 
 Enumeration guards (0 = unlimited): masslimit skips enumerating a definite genus whose
@@ -122,7 +122,19 @@ sum_p p^(rank-2) over the Hecke primes p, exceeds adjlimit;
 sizelimit records the genus-level data but skips storing individual lattices past that
 class number; timelimit is a per-genus wall-clock cap on the per-lattice loop.  In every
 case the genus-level record is still written, so a guarded genus is bounded rather than
-either running for hours or going missing.  use_orth selects the orbit-method
+either running for hours or going missing.
+
+perlattice is the wall-clock each individual lattice gets for its own computations
+(canonical form, automorphism group, theta series).  It used to be derived as
+timeout/class_number, which starved exactly the genera that needed it most -- at
+timeout 300 a class-number-55 genus gave each lattice 6s, while CanonicalForm alone
+measures 8-66s at rank 12, so those fields were silently written as "\N".  Note this
+trades against timelimit: the per-lattice loop costs roughly class_number*perlattice,
+and a genus that overruns timelimit has ALL of its lattices discarded, so raising
+perlattice without raising timelimit turns partial data into no data.  Left at 0 it
+falls back to the old timeout/class_number budget.
+
+use_orth selects the orbit-method
 enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
     genus_t0 := Realtime();
     data := Split(Split(Read(LabelPath("genera_basic", label)), "\n")[1], "|");
@@ -250,7 +262,17 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
     end if;
 
     if (#reps gt 0) then
-        to_per_rep := timeout div #reps + 1;
+        // PER-OPERATION timeout, NOT a per-lattice aggregate: to_per_rep is passed
+        // independently to CanonicalForm, AutomorphismGroupFaster, the primal theta series
+        // and the dual theta series below, so a single lattice can spend up to ~4*to_per_rep
+        // (plus the unbounded Minimum/kissing work between them).  The aggregate wall-clock
+        // guard is the per-GENUS timelimit checked at the top of this loop, not this value.
+        // perlattice gives every operation the same budget regardless of class number; the
+        // old timeout/#reps split a fixed budget across the representatives, which starved
+        // precisely the large genera (class number 55 at timeout 300 => 6s per operation,
+        // against a measured 8-66s just for CanonicalForm at rank 12) and silently wrote the
+        // results as "\N".  Kept as the fallback when perlattice is 0.
+        to_per_rep := (perlattice gt 0) select perlattice else timeout div #reps + 1;
     end if;
 
     // Theta-series timing per precision, aggregated over the genus representatives.
@@ -327,9 +349,17 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
         if (n eq s) then
             vprintf FillGenus, 1 : "%o", gram;
             // The automorphism group and dual must be expressed in the same basis as
-            // the stored gram (ConnectGenus rebuilds the lattice from that gram); once
-            // the gram is canonicalised below, Lcanon holds the canonical lattice.
-            Lcanon := L;
+            // the stored gram (ConnectGenus rebuilds the lattice from that gram, and
+            // reuses lat["aut_group"] unchanged against it -- see VoronoiData/
+            // AutOrbitCoords/tDesign in connect_genus.m). Lcanon must therefore start
+            // out matching lat["gram"] (= gram, LLL-reduced above), NOT L (gram0's
+            // basis) -- gram0 and gram can differ by a basis change LLLGram picked,
+            // in which case an automorphism group computed on L would not preserve
+            // gram at all (confirmed: on a scrambled-basis E8 test case, ALL of its
+            // generators failed to preserve the stored gram). If CanonicalForm below
+            // succeeds, Lcanon and lat["gram"] both get overwritten together to the
+            // canonical lattice, staying in sync the same way.
+            Lcanon := LatticeWithGram(gram);
             success, canonical_gram, elapsed := TimeoutCall(to_per_rep, CanonicalForm, <gram>, 1);
             vprintf FillGenus, 1 : "Canonical form computed in %o seconds\n", elapsed;
             if success then

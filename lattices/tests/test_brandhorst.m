@@ -1,4 +1,8 @@
+AttachSpec("lattices.spec");
 import "canonical_form.m" : test_canonical;
+load "tests/assertions.m";
+results := NewResults();
+
 function TextToMatrix(s)
   first := Index(s, "[")+1;
   last := #s - Index(Reverse(s), "]");
@@ -34,8 +38,11 @@ s := " [-2 -1 -1 1 1 -1 1 -1 0 0 0 0 0 0 0 0 0; -1 -2 -1 0 1 -1 0 0 0 0 0 0 0 0 
 s_mats := Split(s, "\n");
 mats := [TextToMatrix(smat) : smat in s_mats];
 time cans := [CanonicalForm(mat) : mat in mats]; // 376.170
-// This should take roughly double the time 
+// This should take roughly double the time
 print "testing...";
-for mat in mats do
-  test_canonical(mat);
+for i in [1..#mats] do
+  test_canonical(mats[i]);
+  AssertTrue(~results, true, Sprintf("test_canonical(mats[%o]) completed without raising", i));
 end for;
+
+Report(~results, "test_brandhorst");

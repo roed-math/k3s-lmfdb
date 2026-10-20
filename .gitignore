@@ -5,3 +5,5 @@ data
 *.pyc
 lattices/flasklog
 lattices/slow_queries.log
+.DS_Store
+lattices/all_labels.gz.tar

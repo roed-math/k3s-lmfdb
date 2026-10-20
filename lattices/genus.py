@@ -16,6 +16,7 @@ from sage.quadratic_forms.genera.genus import (
 from sage.quadratic_forms.genera.genus import GenusSymbol_global_ring # type: ignore
 from sage.rings.integer_ring import ZZ # type: ignore
 from sage.rings.real_mpfr import RR # type: ignore
+from hanke_full import install_fast_maximal_overlattice # type: ignore
 
 def get_product(set_list):
     '''
@@ -840,6 +841,14 @@ def write_all_of_sig_between_genera_basic(n_plus, n_minus, lb_det, ub_det):
     Create data files with all genera of a certain signature with determinant between lb_det and ub_det,
     one file for each genus
     '''
+    # Speeds up representative() (genus.py:create_genus_entry, the listing stage's main
+    # cost) ~1.64x by substituting maximal_overlattice_2 for Sage's own maximal_overlattice.
+    # @parallel forks a fresh process per call, so this must be installed here rather than
+    # at module import: install_fast_maximal_overlattice monkey-patches a Sage class for
+    # every caller in the process, and genus.py is also imported by code that never wants
+    # that (e.g. testGenus.py). See hanke_full.install_fast_maximal_overlattice's docstring
+    # for the correctness sweep this relies on.
+    install_fast_maximal_overlattice()
     folder_name = "genera_basic/%d/%d" % (n_plus + n_minus, n_plus)   # rank/nplus, matching LabelPath
     os.makedirs(folder_name, exist_ok=True)
     sgn = 1 if is_even(n_minus) else -1;

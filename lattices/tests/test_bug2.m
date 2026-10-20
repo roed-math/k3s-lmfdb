@@ -1,4 +1,7 @@
-import "canonical_form.m" : test_V, test_canonical, V_cvp;
+AttachSpec("lattices.spec");
+load "tests/assertions.m";
+results := NewResults();
+
 lats := [LatticeWithGram(Matrix(11,11,i)): i in [
     [ 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 2, 1, -1, 0, 1, 1, 0, -1, 1, 2, 0, 1,
     2, -1, 0, 1, 1, 0, 0, 1, 2, 0, -1, -1, 2, -1, -1, -1, 0, 0, 0, -2, 0, 0, 0,
@@ -13,6 +16,11 @@ lats := [LatticeWithGram(Matrix(11,11,i)): i in [
     -1, 1, 0, -1, 2, 0, 3, -1, 0, 0, 2, 2, -1, -1, 0, -2, 3, -1, 5, 4, 0, 2, 1,
     -1, -1, 0, -2, 3, 0, 4, 6 ]
 ]];
-assert IsIsomorphic(lats[1],lats[2]);
-assert CanonicalForm(lats[1]) eq CanonicalForm(lats[2]);
-assert CanonicalForm(GramMatrix(lats[1])) eq CanonicalForm(GramMatrix(lats[2]));
+
+AssertTrue(~results, IsIsomorphic(lats[1], lats[2]), "IsIsomorphic(lats[1], lats[2])");
+AssertTrue(~results, CanonicalForm(lats[1]) eq CanonicalForm(lats[2]),
+    "CanonicalForm(lats[1]) eq CanonicalForm(lats[2])");
+AssertTrue(~results, CanonicalForm(GramMatrix(lats[1])) eq CanonicalForm(GramMatrix(lats[2])),
+    "CanonicalForm(GramMatrix(lats[1])) eq CanonicalForm(GramMatrix(lats[2]))");
+
+Report(~results, "test_bug2");

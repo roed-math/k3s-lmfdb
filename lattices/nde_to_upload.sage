@@ -118,17 +118,21 @@ def load_schemas(reset=False):
                         col, typ, desc = line.split("|")[1:-1]
                         col = col.strip()
                         typ = typ.strip()
-                        if col == "Column" and typ == "Type" and desc == "Description":
+                        # desc is not stripped above, so compare stripped here or
+                        # the header row parses as a column literally named "Column".
+                        if col == "Column" and typ == "Type" and desc.strip() == "Description":
                             continue
                         hline = set("-:")
-                        if all(x.issubset(hline) for x in [col, typ, desc]):
+                        if all(set(x.strip()).issubset(hline) for x in [col, typ, desc]):
                             continue
                         m = md_link_re.fullmatch(col)
                         if m:
                             col = m.group(1)
                         schemas[table].append((col, typ))
                         descriptions[table].append(desc)
-            new_hashes[table] = (hash(schemas[table]), hash(descriptions[table]))
+            # tuple(), because schemas[table]/descriptions[table] are lists and
+            # hash() rejects those.
+            new_hashes[table] = (hash(tuple(schemas[table])), hash(tuple(descriptions[table])))
             if table in old_hashes:
                 if old_hashes[table] != new_hashes[table]:
                     warned = True
@@ -138,7 +142,7 @@ def load_schemas(reset=False):
                         wtype = "Descriptions"
                     print(f"Warning!  {wtype} for {table} have changed, so stored data may not be valid.  Call load_schemas(reset=True) to suppress this message, and delete_stored_data('{table}') to delete all stored data for this table.")
     if reset or not old_hashes or (not warned and sorted(new_hashes) != sorted(old_hashes)):
-        save_schema_hashes()
+        save_schema_hashes(new_hashes)
     return schemas, warned, descriptions
 
 def write_location(table, label=None):

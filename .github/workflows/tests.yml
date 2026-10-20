@@ -1,0 +1,264 @@
+name: tests
+
+# Adapted from assaferan/AtkinLehnerQuotients's tests.yml (itself from
+# assaferan/ShimuraCurveALQuotients). Two differences from that template
+# worth knowing:
+#
+#  - Everything Magma-related is rooted at lattices/, not the repo root:
+#    lattices.spec, tests/, and the tests/run.sh runner all live there, so
+#    every step below either cds into lattices/ or globs lattices/tests/.
+#
+#  - Checkout is recursive. lattices.spec pulls in the FiniteGroups,
+#    Parallel.magma, and lattools submodules; without `submodules: recursive`
+#    AttachSpec dies at `Could not open file`, which looks like a code
+#    failure but is not.
+#
+# tests/run.sh already gives one Magma process per suite, a PASS/FAIL/
+# INCOMPLETE verdict from the completion marker, and a transcript in
+# lattices/tests/logs/. INCOMPLETE (crash / no marker) is deliberately
+# distinct from FAIL (wrong answer) and both exit non-zero, so CI inherits
+# that distinction for free.
+
+on:
+  push:
+    branches: [ '**' ]
+
+  pull_request_target:
+
+  # The slow suites are excluded from push/PR runs (see set-matrix below) --
+  # test_l12a_plus alone takes ~2h23m. These two triggers are how they still
+  # get run: on demand, and once a week.
+  workflow_dispatch:
+
+  schedule:
+    - cron: '0 5 * * 0'   # Sundays 05:00 UTC
+
+jobs:
+
+  # Enumerate suites so each gets its own job, running concurrently instead of
+  # serialising. On push/PR the slow suites are dropped (test_l12a_plus is
+  # ~2h23m, test_brandhorst ~4m, against ~18s for all eight others); they run
+  # on workflow_dispatch and on the weekly schedule instead.
+  # tests/assertions.m is a helper, not a suite, and does not match test_*.m.
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        if: ${{ github.event_name == 'push' }}
+
+      - uses: actions/checkout@v4
+        if: ${{ github.event_name == 'pull_request_target' }}
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - id: set-matrix
+        run: |
+          suites=$(ls -1 lattices/tests/test_*.m | xargs -n1 basename | sed 's/\.m$//')
+
+          # SLOW_SUITES is defined in tests/run.sh; parse it rather than repeat
+          # it here, so the local runner and CI cannot disagree about which
+          # suites are slow.
+          sed -n 's/^SLOW_SUITES="\(.*\)"$/\1/p' lattices/tests/run.sh \
+            | tr ' ' '\n' | grep -v '^$' > /tmp/slow_suites.txt
+          echo "slow suites:"; cat /tmp/slow_suites.txt
+
+          case "${{ github.event_name }}" in
+            push|pull_request_target)
+              suites=$(printf '%s\n' "$suites" | grep -vxF -f /tmp/slow_suites.txt || true)
+              echo "push/PR event: excluding the slow suites" ;;
+            *)
+              echo "${{ github.event_name }} event: running every suite" ;;
+          esac
+
+          if [ -z "$suites" ]; then
+            echo "::error::no test suites selected"
+            exit 1
+          fi
+
+          matrix=$( (
+            echo '{ "target" : ['
+            printf '%s\n' "$suites" | sed -r 's/^(.*)$/"\1"/' | paste -sd "," -
+            echo " ]}"
+          ) | jq -c . )
+          echo "$matrix" | jq .
+          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+
+  # The MAGMA_* secrets are not set on a fresh fork, and Magma is licensed
+  # software that cannot be fetched without them. Rather than fail every run
+  # with a confusing download error, gate the test job on the secret being
+  # present so it skips cleanly instead.
+  has_access:
+    runs-on: ubuntu-latest
+    outputs:
+      has_access: ${{ steps.my-key.outputs.has_access }}
+    steps:
+      - id: my-key
+        env:
+          MAGMA_URL: ${{ secrets.MAGMA_URL }}
+        if: "${{ env.MAGMA_URL != '' }}"
+        run: |
+          echo "has_access=true" >> $GITHUB_OUTPUT
+
+  # Download Magma ONCE and populate the shared cache before the matrix fans
+  # out. On a cold cache the matrix jobs would otherwise each fire the same
+  # authenticated wget at the licence server in parallel; the server throttles
+  # the connections, wget stalls, and the tests are skipped rather than run.
+  prime-magma:
+    runs-on: ubuntu-latest
+    needs: has_access
+    if: needs.has_access.outputs.has_access == 'true'
+    steps:
+      - name: Cache magma
+        uses: actions/cache@v4
+        id: magmacache
+        env:
+          # Keep in sync with CACHE_NUMBER in the test job below.
+          CACHE_NUMBER: 2.29-4
+        with:
+          path: ./magma
+          key: ${{ env.CACHE_NUMBER }}
+
+      - name: Install magma
+        env:
+          MAGMA_URL: ${{ secrets.MAGMA_URL }}
+          MAGMA_USERNAME: ${{ secrets.MAGMA_USERNAME }}
+          MAGMA_PASSWORD: ${{ secrets.MAGMA_PASSWORD }}
+        shell: bash
+        if: steps.magmacache.outputs.cache-hit != 'true'
+        run: |
+          # Bounded timeout so a stalled connection fails fast instead of
+          # hanging, with backoff retries. --no-verbose (not --quiet) keeps the
+          # actual wget error in the log.
+          # Basic auth only when a username is actually set. Sibling repos
+          # (ModFrmGL2, hilbertmodularforms) point MAGMA_URL at a location
+          # that needs no credentials -- the URL is secret, not protected --
+          # so passing empty --user/--password there would be wrong.
+          auth=()
+          if [ -n "${MAGMA_USERNAME:-}" ]; then
+            auth=(--user="$MAGMA_USERNAME" --password="$MAGMA_PASSWORD")
+          fi
+          for attempt in 1 2 3 4 5; do
+            if wget "$MAGMA_URL" -O magma.tar.gz "${auth[@]}" \
+                 --timeout=120 --tries=3 --waitretry=30 --retry-connrefused --no-verbose; then
+              if tar xf magma.tar.gz; then break; fi
+            fi
+            echo "::warning::magma download/extract attempt $attempt failed; backing off $((attempt*30))s"
+            rm -f magma.tar.gz
+            sleep $((attempt * 30))
+          done
+          test -x ./magma/magma
+
+  test:
+    runs-on: ubuntu-latest
+    name: ${{ matrix.target }}
+    needs: [has_access, matrix, prime-magma]
+    if: needs.has_access.outputs.has_access == 'true'
+
+    # The slow suites (test_brandhorst, test_l12a_plus) can run for several
+    # minutes; the default 360-minute ceiling is GitHub's hard job limit, so a
+    # suite that exceeds it needs to be run locally rather than here.
+    timeout-minutes: 350
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix.outputs.matrix) }}
+
+    steps:
+      # SECURITY: pull_request_target runs with this repository's secrets while
+      # checking out the PR head below -- i.e. untrusted code with access to the
+      # Magma credentials. This permission gate is the only thing preventing an
+      # arbitrary fork PR from exfiltrating them. Do not remove it, and do not
+      # move it after the checkout.
+      - name: Check user permission
+        id: check
+        uses: scherermichael-oss/action-has-permission@master
+        with:
+          required-permission: write
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Stop workflow for users with no write access
+        if: "! steps.check.outputs.has-permission"
+        run: |
+          echo "Sorry! Your permissions are insufficient."
+          false
+
+      - name: Checkout for a push event
+        uses: actions/checkout@v4
+        if: ${{ github.event_name == 'push' }}
+        with:
+          submodules: recursive
+
+      - name: Checkout for a PR event
+        uses: actions/checkout@v4
+        if: ${{ github.event_name == 'pull_request_target' }}
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          submodules: recursive
+
+      - name: Cache magma
+        uses: actions/cache@v4
+        id: magmacache
+        env:
+          # Increase this value to reset the cache when MAGMA_URL changes.
+          CACHE_NUMBER: 2.29-4
+        with:
+          path: ./magma
+          key: ${{ env.CACHE_NUMBER }}
+
+      - name: Install magma
+        env:
+          MAGMA_URL: ${{ secrets.MAGMA_URL }}
+          MAGMA_USERNAME: ${{ secrets.MAGMA_USERNAME }}
+          MAGMA_PASSWORD: ${{ secrets.MAGMA_PASSWORD }}
+        shell: bash
+        if: steps.magmacache.outputs.cache-hit != 'true'
+        run: |
+          # Fallback: normally skipped because prime-magma warmed the cache.
+          # Basic auth only when a username is actually set. Sibling repos
+          # (ModFrmGL2, hilbertmodularforms) point MAGMA_URL at a location
+          # that needs no credentials -- the URL is secret, not protected --
+          # so passing empty --user/--password there would be wrong.
+          auth=()
+          if [ -n "${MAGMA_USERNAME:-}" ]; then
+            auth=(--user="$MAGMA_USERNAME" --password="$MAGMA_PASSWORD")
+          fi
+          for attempt in 1 2 3 4 5; do
+            if wget "$MAGMA_URL" -O magma.tar.gz "${auth[@]}" \
+                 --timeout=120 --tries=3 --waitretry=30 --retry-connrefused --no-verbose; then
+              if tar xf magma.tar.gz; then break; fi
+            fi
+            echo "::warning::magma download/extract attempt $attempt failed; backing off $((attempt*30))s"
+            rm -f magma.tar.gz
+            sleep $((attempt * 30))
+          done
+          test -x ./magma/magma
+
+      # Magma's licence is keyed to a MAC address, so give the runner a dummy
+      # interface carrying one of the addresses this licence accepts. The bare
+      # `echo | magma` afterwards is a licence handshake, not a test.
+      - name: Create dummy network device
+        shell: bash
+        run: |
+          sudo ip link add dumdum type dummy
+          sudo ifconfig dumdum hw ether `./magma/magma -d | grep "Valid MAC addresses" -A1 | tail -n1`
+          echo | ./magma/magma
+
+      # run.sh insists on being run from lattices/ (where lattices.spec lives)
+      # and honours $MAGMA. Single-suite mode exits 0 only on PASS, so FAIL
+      # and INCOMPLETE both fail the job.
+      - name: Run test suite
+        shell: bash
+        working-directory: lattices
+        run: |
+          MAGMA="$GITHUB_WORKSPACE/magma/magma" tests/run.sh ${{ matrix.target }}
+
+      - name: Upload transcript on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-${{ matrix.target }}
+          path: lattices/tests/logs/${{ matrix.target }}.log
+          if-no-files-found: warn

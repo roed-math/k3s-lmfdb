@@ -2,6 +2,7 @@
 // Usage: magma -b label:=foo run_fill_genus.m
 // Batch: magma -b labels:=foo:bar:baz run_fill_genus.m
 // Options: timeout:=N (default 60, seconds per label)
+//          done:=1 (print DONE sentinel per label, for wrapper scripts)
 //
 // Parallel across servers:
 //   xargs -n 100 < genera_todo.txt | tr ' ' ':' > genera_todo_chunked.txt
@@ -12,6 +13,7 @@
 // Errors are prefixed with "ERROR: label: ..."
 // Extract retry list: grep '^ERROR:' output.txt | cut -d: -f2 | tr -d ' ' > genera_failed.txt
 
+SetQuitOnError(true);
 AttachSpec("lattices.spec");
 
 if not assigned verbose then verbose := "0"; end if;
@@ -30,6 +32,10 @@ if not assigned timelimit then timelimit := "0"; end if;
 timelimit := StringToInteger(timelimit);
 if not assigned adjlimit then adjlimit := "0"; end if;
 adjlimit := StringToInteger(adjlimit);
+// Wall-clock each individual lattice gets (canonical form, automorphism group, theta).
+// 0 falls back to the old timeout/class_number budget.  See FillGenus.
+if not assigned perlattice then perlattice := "0"; end if;
+perlattice := StringToInteger(perlattice);
 // useorth:=0 disables the orbit-method enumeration; 1 (default) routes by
 // UseOrthHeuristic; 2 forces the orbit method for every definite rank >= 3 genus
 // (mainly for testing/benchmarking, and to exercise the provenance columns at
@@ -41,6 +47,9 @@ useorth := useorth ge 1;
 // warmlimit: wall-clock budget (seconds) for the batch cache pre-warm below.
 if not assigned warmlimit then warmlimit := "300"; end if;
 warmlimit := StringToInteger(warmlimit);
+
+if not assigned done then done := "0"; end if;
+done := StringToInteger(done) ne 0;
 
 if assigned labels then
     label_list := Split(labels, ":");
@@ -92,8 +101,10 @@ if useorth and #label_list gt 1 then
 end if;
 failed := [];
 for l in label_list do
+    if done then printf "START: %o\n", l; end if;
     try
-        FillGenus(l : timeout := timeout, masslimit := masslimit, sizelimit := sizelimit, timelimit := timelimit, adjlimit := adjlimit, use_orth := useorth, force_orth := forceorth);
+        FillGenus(l : timeout := timeout, masslimit := masslimit, sizelimit := sizelimit, timelimit := timelimit, adjlimit := adjlimit, perlattice := perlattice, use_orth := useorth, force_orth := forceorth);
+        if done then printf "DONE: %o\n", l; end if;
     catch e
         printf "ERROR: %o: %o\n", l, e;
         Append(~failed, l);
