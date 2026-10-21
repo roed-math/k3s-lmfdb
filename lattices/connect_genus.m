@@ -127,11 +127,22 @@ intrinsic FindLabel(L::Lat : genus_data:=<>) -> MonStgElt
         // load_hash_by_hash skips "\N" hashes, so every indefinite lattice used to get
         // label "\N" here -- even I_{3,1}, its own dual.  The stored lattices of a
         // genus are all of its classes or none, so a genus with a single stored row
-        // has class number 1 and that row is L's class.  With several classes we
-        // would need a spinor-genus test to tell them apart; leave those "\N".
+        // has class number 1 and that row is L's class.  Rank 2 has an exact
+        // isometry test (IsIsometricBinary).  For rank >= 3 the classes are the
+        // (improper) spinor genera, and Magma has no cheap way to place a given
+        // lattice in one (its spinor-genus eq falls back to isometry tests), so
+        // those stay "\N".
         rows := load_hash_rows(genus_hash, Rank(L), nplus);
         if #rows eq 1 then
             return rows[1][label_pos];
+        end if;
+        if #rows gt 1 and Rank(L) eq 2 and Determinant(L) lt 0 then
+            gram_pos := Index(hash_format, "gram");
+            for row in rows do
+                if IsIsometricBinary(L, GramStringToLat(row[gram_pos], 2)) then
+                    return row[label_pos];
+                end if;
+            end for;
         end if;
         return "\\N";
     elif #by_hash eq 1 then
@@ -810,7 +821,19 @@ two-pass connect in run_all.py).}
         end for;
         L := GramStringToLat(lat["gram"], n);
         scale := GCD([Integers() | x : x in Eltseq(GramMatrix(L))]);   // = gcd(rep), a genus invariant
-        D := Dual(L);
+        // Indefinite: build the rescaled dual (the primitive integral multiple of the
+        // inverse Gram matrix) directly rather than via Dual, which has been reported
+        // to require a definite form on non-unimodular indefinite lattices (Magma
+        // 2.29; 2.30-1 handles them).  On all 722 indefinite R=4, D=120 smoke
+        // lattices the two agree in determinant, genus and FindLabel result.
+        if definite then
+            D := Dual(L);
+        else
+            Gd := ChangeRing(GramMatrix(L), Rationals())^-1;
+            Gd := Denominator(Gd) * Gd;
+            Gd := ChangeRing(Gd / GCD([Integers() | x : x in Eltseq(ChangeRing(Gd, Integers()))]), Integers());
+            D := LatticeWithGram(Gd : CheckPositive := false);
+        end if;
 
         // Default every advanced column to "\N"; the computations below overwrite
         // the ones that apply (most are definite-only, so indefinite lattices keep
