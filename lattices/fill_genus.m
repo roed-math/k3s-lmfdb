@@ -31,7 +31,7 @@ intrinsic ThetaSeriesIncremental(L::Lat, target_prec::RngIntElt, timeout::RngInt
     prec := Maximum(16, Minimum(L) + 4);
     while prec le target_prec and remaining gt 0 do
         current_prec := Minimum(prec, target_prec);
-        success, theta, elapsed := TimeoutCall(remaining, ThetaSeries, <L, current_prec - 1>, 1);
+        success, theta, elapsed := TimeoutCall(remaining, ThetaSeries, <L, current_prec - 1>, 1 : HardKill := true);
         if not success then
             vprintf FillGenus, 1 : "Theta series timed out at precision %o\n", current_prec;
             break;
@@ -360,7 +360,7 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
             // succeeds, Lcanon and lat["gram"] both get overwritten together to the
             // canonical lattice, staying in sync the same way.
             Lcanon := LatticeWithGram(gram);
-            success, canonical_gram, elapsed := TimeoutCall(to_per_rep, CanonicalForm, <gram>, 1);
+            success, canonical_gram, elapsed := TimeoutCall(to_per_rep, CanonicalForm, <gram>, 1 : HardKill := true);
             vprintf FillGenus, 1 : "Canonical form computed in %o seconds\n", elapsed;
             if success then
                 canonical_gram := canonical_gram[1];
@@ -370,7 +370,7 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
                 Lcanon := LatticeWithGram(canonical_gram);
                 lat["lattice"] := Lcanon;
             end if;
-            success, aut_group, elapsed := TimeoutCall(to_per_rep, AutomorphismGroupFaster, <Lcanon>, 1);
+            success, aut_group, elapsed := TimeoutCall(to_per_rep, AutomorphismGroupFaster, <Lcanon>, 1 : HardKill := true);
             vprintf FillGenus, 1 : "Automorphism group computed in %o seconds\n", elapsed;
             if success then
                 aut_group := aut_group[1];

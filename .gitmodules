@@ -3,9 +3,7 @@
 	url = https://github.com/roed314/FiniteGroups.git
 [submodule "Parallel.magma"]
 	path = lattices/Parallel.magma
-	url = git@github.com:edgarcosta/Parallel.magma.git
+	url = https://github.com/roed-math/Parallel.magma.git
 [submodule "lattices/lattools"]
 	path = lattices/lattools
 	url = https://github.com/assaferan/lattools.git
-[submodule "lattices/Parallel.magma"]
-	url = git@github.com:assaferan/Parallel.magma.git

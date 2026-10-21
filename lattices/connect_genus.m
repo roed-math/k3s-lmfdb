@@ -598,9 +598,10 @@ intrinsic LoadSVdat(labels::SeqEnum[MonStgElt]) -> SeqEnum
     return ans;
 end intrinsic;
 
-intrinsic TimeoutAssign(~D::Assoc, key::MonStgElt, func::Program, inp::Tup, timeout::RngIntElt : Parameters := [])
-{Compute value using given function, then store in D}
-    success, out, elapsed := TimeoutCall(timeout, func, inp, 1 : Parameters := Parameters);
+intrinsic TimeoutAssign(~D::Assoc, key::MonStgElt, func::Program, inp::Tup, timeout::RngIntElt : Parameters := [], HardKill := true)
+{Compute value using given function, then store in D.  HardKill (see TimeoutCall) is on by
+default: these computations sit in C builtins the child's Alarm cannot interrupt.}
+    success, out, elapsed := TimeoutCall(timeout, func, inp, 1 : Parameters := Parameters, HardKill := HardKill);
     if success then
         D[key] := out[1];
     else
@@ -991,7 +992,7 @@ two-pass connect in run_all.py).}
             have_aut := Type(aut_group) eq GrpMat;
             // In addition to the timeout, we may want to impose a rank limit
             if have_aut then
-                success, vdat, elapsed := TimeoutCall(timeout, VoronoiData, <L, aut_group>, 6);
+                success, vdat, elapsed := TimeoutCall(timeout, VoronoiData, <L, aut_group>, 6 : HardKill := true);
                 if success then
                     lat["covering_norm_num"], lat["covering_norm_den"], lat["deep_holes"], lat["deep_hole_count"], lat["deep_hole_orbit_count"], lat["hole_count"] := Explode(vdat);
                     // We write the data to a file for loading in the decomposable case
@@ -999,7 +1000,7 @@ two-pass connect in run_all.py).}
                 end if;
             end if;
 
-            has_sv, S, elapsed := TimeoutCall(timeout, ShortestVectorCoords, <L>, 1);
+            has_sv, S, elapsed := TimeoutCall(timeout, ShortestVectorCoords, <L>, 1 : HardKill := true);
             if has_sv then
                 // magma returns representatives up to +-; ShortestVectorCoords
                 // returns coordinate sequences (lattice vectors are not
@@ -1012,7 +1013,7 @@ two-pass connect in run_all.py).}
                 TimeoutAssign(~lat, "is_well_rounded", IsWellRounded, <L, S>, timeout);
                 TimeoutAssign(~lat, "is_minimal_vector_generated", IsMinimalVectorGenerated, <L, S>, timeout);
                 TimeoutAssign(~lat, "is_strongly_well_rounded", IsStronglyWellRounded, <L, S>, timeout);
-                has_eutaxy, eutaxy_data, elapsed := TimeoutCall(timeout, IsEutactic, <L, S>, 2);
+                has_eutaxy, eutaxy_data, elapsed := TimeoutCall(timeout, IsEutactic, <L, S>, 2 : HardKill := true);
                 if has_eutaxy then
                     lat["is_eutactic"], eutaxy := Explode(eutaxy_data);
                     lat["is_strongly_eutactic"] := lat["is_eutactic"] and (#Set(eutaxy) eq 1);
@@ -1062,7 +1063,7 @@ two-pass connect in run_all.py).}
         // "Numerical GSO does not seem to be positive definite".  Only decide it in
         // the definite case; leave it "\N" (undetermined) otherwise.
         if definite then
-            ai_ok, ai_data := TimeoutCall(timeout, IsAdditivelyIndecomposable, <L>, 2);
+            ai_ok, ai_data := TimeoutCall(timeout, IsAdditivelyIndecomposable, <L>, 2 : HardKill := true);
             if ai_ok then
                 ai_val, ai_known := Explode(ai_data);
                 lat["is_additively_indecomposable"] := ai_known select ai_val else "\\N";
