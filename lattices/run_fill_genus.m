@@ -2,6 +2,7 @@
 // Usage: magma -b label:=foo run_fill_genus.m
 // Batch: magma -b labels:=foo:bar:baz run_fill_genus.m
 // Options: timeout:=N (default 60, seconds per label)
+//          stats:=1 (write a fill_stats/ record per genus, for calibration)
 //          done:=1 (print DONE sentinel per label, for wrapper scripts)
 //
 // Parallel across servers:
@@ -47,6 +48,11 @@ useorth := useorth ge 1;
 // warmlimit: wall-clock budget (seconds) for the batch cache pre-warm below.
 if not assigned warmlimit then warmlimit := "300"; end if;
 warmlimit := StringToInteger(warmlimit);
+
+// stats:=1 writes a per-genus fill_stats/ record (outcome, class number, timings);
+// see FillGenus and calibrate_fill.py.
+if not assigned stats then stats := "0"; end if;
+stats := StringToInteger(stats) ne 0;
 
 if not assigned done then done := "0"; end if;
 done := StringToInteger(done) ne 0;
@@ -103,7 +109,7 @@ failed := [];
 for l in label_list do
     if done then printf "START: %o\n", l; end if;
     try
-        FillGenus(l : timeout := timeout, masslimit := masslimit, sizelimit := sizelimit, timelimit := timelimit, adjlimit := adjlimit, perlattice := perlattice, use_orth := useorth, force_orth := forceorth);
+        FillGenus(l : timeout := timeout, masslimit := masslimit, sizelimit := sizelimit, timelimit := timelimit, adjlimit := adjlimit, perlattice := perlattice, use_orth := useorth, force_orth := forceorth, stats := stats);
         if done then printf "DONE: %o\n", l; end if;
     catch e
         printf "ERROR: %o: %o\n", l, e;

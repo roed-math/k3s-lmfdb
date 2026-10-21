@@ -112,7 +112,7 @@ function SphereVolume(n)
     end if;
 end function;
 
-intrinsic FillGenus(label::MonStgElt : timeout := 1800, masslimit := 0, sizelimit := 0, timelimit := 0, adjlimit := 0, perlattice := 0, use_orth := true, force_orth := false)
+intrinsic FillGenus(label::MonStgElt : timeout := 1800, masslimit := 0, sizelimit := 0, timelimit := 0, adjlimit := 0, perlattice := 0, use_orth := true, force_orth := false, stats := false)
 {Fill the data for a genus and its lattice representatives, given files in the genera_basic format.
 
 Enumeration guards (0 = unlimited): masslimit skips enumerating a definite genus whose
@@ -135,7 +135,10 @@ perlattice without raising timelimit turns partial data into no data.  Left at 0
 falls back to the old timeout/class_number budget.
 
 use_orth selects the orbit-method
-enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
+enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).
+stats writes one fill_stats/ record per genus (fill_stats.format): which guard, if any,
+decided the outcome, the class number, per-phase wall-clock and the slowest single
+lattice -- the data for calibrating the guards (calibrate_fill.py).}
     genus_t0 := Realtime();
     data := Split(Split(Read(LabelPath("genera_basic", label)), "\n")[1], "|");
     basic_format := Split(Read("genera_basic.format"), "|");
@@ -185,6 +188,9 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
         genus_success, reps, orth_prov := GenusReps(L0 : Timeout := timeout,
             UseOrth := use_orth and (force_orth or UseOrthHeuristic(n, genus_mass)));
     end if;
+    t_enum := Realtime(genus_t0);
+    enum_method := skip_massive select "none" else ((n eq s and use_orth and n ge 3 and (force_orth or UseOrthHeuristic(n, genus_mass))) select "orth" else "default");
+    adj_status := "none";
     advanced["class_number"] := "\\N";
     advanced["adjacency_matrix"] := "\\N";
     advanced["adjacency_polynomials"] := "\\N";
@@ -235,6 +241,7 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
             hecke_mats[p] := Ap;
             hecke_polys[p] := [(<Coefficients(pair[1]), pair[2]>) : pair in fpf];
           end for;
+          adj_status := adj_ok select "ok" else "timeout";
           if adj_ok then
             vprintf FillGenus, 1 : "Done!\n";
             advanced["adjacency_matrix"] := to_postgres(hecke_mats);
@@ -248,7 +255,9 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
     end if;
     // sizelimit: past this class number, keep the genus-level record but skip the
     // per-lattice loop below (individual automorphism groups, theta series, hashes).
-    if (sizelimit gt 0) and (#reps gt sizelimit) then
+    t_adj := Realtime(genus_t0) - t_enum;
+    size_skipped := (sizelimit gt 0) and (#reps gt sizelimit);
+    if size_skipped then
         vprintf FillGenus, 1 : "Class number %o exceeds sizelimit %o: storing genus-level data only\n", #reps, sizelimit;
         reps := [];
     end if;
@@ -285,7 +294,11 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
     // (a genus under sizelimit whose individual lattices are still pathologically slow),
     // stop and fall back to the genus-level record rather than grinding for hours.
     genus_timed_out := false;
+    reps_done := 0;
+    max_lat_time := 0.0;
+    t_loop0 := Realtime();
     for Li->L in reps do
+        t_lat0 := Realtime();
         if (timelimit gt 0) and (Realtime(genus_t0) gt timelimit) then
             vprintf FillGenus, 1 : "Per-genus timelimit %o s exceeded at rep %o/%o: storing genus-level data only\n", timelimit, Li, #reps;
             genus_timed_out := true;
@@ -455,7 +468,14 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
         //lat["level"] := Level(LatticeWithGram(ChangeRing(GramMatrix(L), Integers()) : CheckPositive:=false));
 
         Append(~lats, lat);
+        reps_done +:= 1;
+        max_lat_time := Maximum(max_lat_time, Realtime(t_lat0));
     end for;
+    t_lattices := Realtime(t_loop0);
+    // per-operation timeouts (or failures) inside the loop, counted before a timelimit
+    // discard empties lats; definite only (indefinite lattices never get either)
+    canon_nulls := (n eq s) select #[lat : lat in lats | not lat["gram_is_canonical"]] else 0;
+    aut_nulls := (n eq s) select #[lat : lat in lats | Type(lat["aut_size"]) ne RngIntElt] else 0;
 
     // If the per-genus timelimit tripped mid-loop, discard the partial lattices so the
     // record is consistent (class_number set, genus-level data only) rather than
@@ -573,5 +593,32 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
     error if Keys(advanced) ne Set(advanced_format), [k : k in advanced_format | k notin Keys(advanced)], [k : k in Keys(advanced) | k notin advanced_format];
     output := Join([basics[k] : k in basic_format] cat [Sprintf("%o", advanced[k]) : k in advanced_format], "|");
     Write(LabelPath("genera_advanced", label : Create), output : Overwrite);
+    if stats then
+        outcome := skip_massive select "mass_skip" else
+                   (not genus_success) select "enum_fail" else
+                   size_skipped select "size_skip" else
+                   genus_timed_out select "time_discard" else "ok";
+        st := AssociativeArray();
+        st["label"] := label;
+        st["rank"] := n;
+        st["nplus"] := s;
+        st["disc_abs"] := basics["disc_abs"];
+        st["mass"] := basics["mass"];
+        st["method"] := enum_method;
+        st["outcome"] := outcome;
+        st["class_number"] := advanced["class_number"];
+        st["lattices_stored"] := #lats;
+        st["reps_processed"] := reps_done;
+        st["canon_nulls"] := canon_nulls;
+        st["aut_nulls"] := aut_nulls;
+        st["adjacency"] := adj_status;
+        st["t_enum"] := t_enum;
+        st["t_adj"] := t_adj;
+        st["t_lattices"] := t_lattices;
+        st["max_lat_time"] := max_lat_time;
+        st["t_total"] := Realtime(genus_t0);
+        stats_format := Split(Split(Read("fill_stats.format"), "\n")[1], "|");
+        Write(LabelPath("fill_stats", label : Create), Join([Sprintf("%o", st[k]) : k in stats_format], "|") : Overwrite);
+    end if;
     return;
 end intrinsic;

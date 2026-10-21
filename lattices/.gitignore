@@ -26,3 +26,16 @@ tensor_indecomp
 tensor_decomp
 voronoi
 shortest
+genus_jobs_*.txt
+embed_jobs.txt
+embed_labels
+inclusions
+lat_inclusions.tbl
+lat_inclusions.tbl.failed
+orth_cache
+refine_sidecar
+regularity_candidates.txt
+fill_stats
+fill_missing_*.txt
+calibration_sample.txt
+calibration_population.tsv

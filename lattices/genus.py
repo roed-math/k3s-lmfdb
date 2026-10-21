@@ -852,7 +852,7 @@ def write_all_of_sig_between(n_plus, n_minus, lb_det, ub_det):
         entries = [create_genus_entry(s) for s in syms]
         write_entries_to_file(entries, fname)
 
-@parallel(ncpus=128) # !!! change this according to platform
+@parallel(ncpus=128) # run_all.py rewraps .func with ncpus=-j; this default only applies to direct callers
 def write_all_of_sig_between_genera_basic(n_plus, n_minus, lb_det, ub_det):
     '''
     Create data files with all genera of a certain signature with determinant between lb_det and ub_det,

@@ -15,6 +15,7 @@ from pathlib import Path
 # and a sage.symbolic.function circular import (via the genus mass computation).
 import sage.all  # noqa: F401
 from genus import write_all_of_sig_between_genera_basic
+from sage.parallel.decorate import parallel as sage_parallel
 
 @contextlib.contextmanager
 def timed(label):
@@ -57,8 +58,9 @@ parser.add_argument("--embed-k3-min-rank", type=int, default=12, help="Lowest ra
 parser.add_argument("--embed-timelimit", type=int, default=3600, help="Wall-clock seconds per embedding job (enforced by GNU parallel --timeout; a killed job loses only its own task)")
 
 # Skip stages
+parser.add_argument("--fill-stats", action="store_true", help="Have FillGenus write one fill_stats/<rank>/<nplus>/<label> record per genus (fields in fill_stats.format): the outcome -- ok, or which guard decided it (mass_skip, enum_fail, size_skip, time_discard) -- the class number, per-phase wall-clock and the slowest single lattice.  Off by default (it is another file per genus); calibrate_fill.py turns it on.")
 parser.add_argument("--skip-list-genera", action="store_true", help="Assume that genera have already been listed")
-parser.add_argument("--skip-enumerate-genera", action="store_true", help="Assume that genera have already been enumerated (implies skip-list-genera)")
+parser.add_argument("--skip-enumerate-genera", action="store_true", help="Skip the fill stage (genus enumeration).  This does NOT imply --skip-list-genera: listing still runs unless that is also given, which is how the census listing was run (listing only, with --skip-embeddings).")
 parser.add_argument("--skip-embeddings", action="store_true", help="Do not compute primitive and K3 embedding data")
 parser.add_argument("--skip-tensor", action="store_true", help="Do not compute tensor product decompositions")
 parser.add_argument("--skip-names", action="store_true", help="Do not find lattice names")
@@ -295,6 +297,28 @@ def parallel(jobfile, joblog, prog_args, colsep=None, prog=None, jobs=None, time
     if result.returncode != 0:
         print(f"  WARNING: {result.returncode} job(s) failed (see {joblog}); continuing", flush=True)
 
+def audit_fill(jobfile, missing_file):
+    """Every genus fill attempted must leave a genera_advanced record -- even a genus a
+    guard stopped (masslimit, enum timeout, sizelimit, timelimit) gets its genus-level
+    row.  So a missing record means the genus was never written: a Magma error or a
+    crash.  That is invisible to null-scanning (there is no row to contain \\N), so list
+    those genera after each rank rather than leave them to be noticed downstream."""
+    missing = []
+    with open(jobfile) as F:
+        for line in F:
+            for label in line.strip().split(":"):
+                if not label:
+                    continue
+                rank, nplus = label.split(".")[:2]
+                if not Path("genera_advanced", rank, nplus, label).exists():
+                    missing.append(label)
+    if missing:
+        Path(missing_file).write_text("\n".join(missing) + "\n")
+        print(f"  WARNING: {len(missing)} genera have no genera_advanced record "
+              f"(listed in {missing_file}; retry with run_fill_genus.sh)", flush=True)
+    elif Path(missing_file).exists():
+        Path(missing_file).unlink()
+
 def clean_outputs():
     """Delete pipeline outputs so this run's data cannot be a mixture of several runs.
 
@@ -308,7 +332,7 @@ def clean_outputs():
     """
     targets = ["genera_advanced", "genera_hash", "lattice_basic_data",
                "lattice_advanced_data", "lattice_hashes", "voronoi", "shortest",
-               "orth_cache",   # stale cached genera would leak old counters/labels into provenance
+               "orth_cache", "fill_stats",   # stale cached genera would leak old counters/labels into provenance
                "inclusions", "embed_labels", "refine_sidecar"]
     if not args.skip_list_genera:
         targets.append("genera_basic")   # regenerated below; otherwise it is this run's input
@@ -318,7 +342,8 @@ def clean_outputs():
         if p.is_dir():
             removed.append(f"{t} ({sum(1 for q in p.rglob('*') if q.is_file())} files)")
             shutil.rmtree(p)
-    for f in [Path("atomic_names"), Path("lat_inclusions.tbl")] + sorted(Path(".").glob("atomic_names_partial_*")):
+    for f in ([Path("atomic_names"), Path("lat_inclusions.tbl")] + sorted(Path(".").glob("atomic_names_partial_*"))
+              + sorted(Path(".").glob("fill_missing_*.txt"))):
         if f.exists():
             f.unlink()
             removed.append(f.name)
@@ -338,7 +363,11 @@ def main():
         start_time = time.monotonic()
         print(f"Listing genera ({total} tasks)...")
 
-        for i, res in enumerate(write_all_of_sig_between_genera_basic(inputs), 1):
+        # genus.py decorates the lister with @parallel(ncpus=128); rewrap the undecorated
+        # function so the Sage worker pool honours -j instead (on a 32-core machine the
+        # fixed 128 oversubscribed it 4x, and nothing else in the run bounded it).
+        lister = sage_parallel(ncpus=args.jobs)(write_all_of_sig_between_genera_basic.func)
+        for i, res in enumerate(lister(inputs), 1):
             elapsed = time.monotonic() - start_time
             avg_time = elapsed / i
             eta = avg_time * (total - i)
@@ -382,7 +411,14 @@ def main():
                           f"perlattice:={args.enum_per_lattice_timeout}",
                           f"useorth:={0 if args.no_orth else 1}",
                           f"warmlimit:={args.warm_limit}",
-                          "labels:={1}", "run_fill_genus.m"])
+                          f"stats:={1 if args.fill_stats else 0}",
+                          "labels:={1}"],
+                         # The wrapper adds done:=1 and checks that every label in the
+                         # batch printed DONE or ERROR, so a Magma segfault (which can
+                         # exit 0) shows up as ERROR lines and a failed job instead of
+                         # silently missing genera.
+                         prog=["./run_fill_genus.sh"])
+            audit_fill(f"genus_jobs_{r}.txt", f"fill_missing_{r}.txt")
 
     if not args.skip_embeddings:
         # Julia/Oscar embedding stage (oscar/INTEGRATION_PLAN.md): overlattices,
