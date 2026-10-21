@@ -150,7 +150,7 @@ def cmd_report(a):
     hdr = ("rank nminus log2det  pop       n  " + " ".join("%-6s" % o[:6] for o in OUTCOMES)
            + "  t_med   t_p90   t_max   h_med  h_max  maxlat_p90  est_cpu_h")
     print(hdr)
-    rank_tot = defaultdict(lambda: [0.0, 0, 0.0])   # rank -> [cpu_h, pop, lost pop]
+    rank_tot = defaultdict(lambda: [0.0, 0, 0.0])   # (rank, definite) -> [cpu_h, pop, lost pop]
     for st in sorted(by):
         recs = by[st]
         oc = Counter((r["outcome"] if r else "missing") for r in recs)
@@ -161,7 +161,7 @@ def cmd_report(a):
         P = pop.get(st, 0)
         cpu_h = mean_t * P / 3600 if times else float("nan")
         lost = sum(oc[o] for o in OUTCOMES if o != "ok") / len(recs)
-        rt = rank_tot[st[0]]
+        rt = rank_tot[(st[0], st[1] == 0)]
         rt[0] += 0 if math.isnan(cpu_h) else cpu_h
         rt[1] += P
         rt[2] += lost * P
@@ -171,10 +171,21 @@ def cmd_report(a):
                   q(times, 0.5), q(times, 0.9), max(times) if times else float("nan"),
                   q(hs, 0.5) if hs else "-", max(hs) if hs else "-", q(ml, 0.9), cpu_h))
     print("\nper rank (population-weighted extrapolation; censored times are lower bounds):")
-    print("rank  population  est_cpu_hours  est_genera_not_ok  mean_s_per_genus")
-    for r in sorted(rank_tot):
-        cpu_h, P, lost = rank_tot[r]
-        print("%4d  %10d  %13.1f  %17d  %16.2f" % (r, P, cpu_h, round(lost), cpu_h * 3600 / P if P else 0))
+    print("rank  type   population  est_cpu_hours  est_genera_not_ok  mean_s_per_genus")
+    tot = [0.0, 0, 0.0]
+    for (r, definite) in sorted(rank_tot):
+        cpu_h, P, lost = rank_tot[(r, definite)]
+        tot = [tot[0] + cpu_h, tot[1] + P, tot[2] + lost]
+        print("%4d  %-5s  %10d  %13.1f  %17d  %16.2f" % (r, "def" if definite else "indef", P, cpu_h,
+                                                        round(lost), cpu_h * 3600 / P if P else 0))
+    print("total        %10d  %13.1f  %17d" % (tot[1], tot[0], round(tot[2])))
+    # genus_work in run_all.py batches fill jobs by these per-genus costs
+    def_cost = {r: v[0] * 3600 / v[1] for (r, d), v in rank_tot.items() if d and v[1]}
+    indef = [v for (r, d), v in rank_tot.items() if not d and v[1]]
+    print("\nmeasured per-genus costs for genus_work (run_all.py):")
+    print("_DEF_COST = {" + ", ".join("%d: %.1f" % (r, c) for r, c in sorted(def_cost.items())) + "}")
+    if indef:
+        print("indefinite: %.2f s per genus" % (sum(v[0] for v in indef) * 3600 / sum(v[1] for v in indef)))
     missing = [l for l in sample if l not in stats]
     if missing:
         print(f"\n{len(missing)} sampled genera have no fill_stats record (crash, error, or not run): "
