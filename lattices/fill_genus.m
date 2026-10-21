@@ -112,6 +112,55 @@ function SphereVolume(n)
     end if;
 end function;
 
+// Coefficient i (1-based) of a stored theta series.  ThetaSeriesIncremental stores
+// Eltseq of the power series, which drops trailing zero coefficients, so a list
+// can be shorter than its precision (common for rescaled duals, whose scale makes
+// most coefficients zero); the missing coefficients are 0, as FirstDiff and
+// ThetaHash in hash.m already assume.  Indexing past the end crashed the sort:
+// "Sequence index 182 should be in the range 1 to 181" on 8.8.504.001.01.3827.
+function coeff(f, i)
+    return i le #f select f[i] else 0;
+end function;
+
+// Sort order of the lattices of a genus (records as built in FillGenus); file level
+// so tests/test_fill_sort.m can exercise it.
+function cmp_lat(L1, L2)
+    n := Isqrt(#L1["gram"]);
+    // 1. automorphism group size (larger first)
+    if Type(L1["aut_size"]) eq RngIntElt and Type(L2["aut_size"]) eq RngIntElt then
+        d := L2["aut_size"] - L1["aut_size"];
+        if (d ne 0) then return d; end if;
+    end if;
+    // 2. density (denser first); within a genus the determinant is fixed, so we
+    //    sort by the minimum as a proxy (larger minimum = denser)
+    if Type(L1["minimum"]) eq RngIntElt and Type(L2["minimum"]) eq RngIntElt then
+        d := L2["minimum"] - L1["minimum"];
+        if (d ne 0) then return d; end if;
+    end if;
+    // 3. theta series
+    if Type(L1["theta_series"]) eq SeqEnum and Type(L2["theta_series"]) eq SeqEnum then
+        prec := Minimum(L1["theta_prec"], L2["theta_prec"]);
+        for i in [1..prec - 1] do
+            d := coeff(L1["theta_series"], i) - coeff(L2["theta_series"], i);
+            if (d ne 0) then return d; end if;
+        end for;
+    end if;
+    // 4. dual theta series
+    if Type(L1["dual_theta_series"]) eq SeqEnum and Type(L2["dual_theta_series"]) eq SeqEnum then
+        prec := Minimum(L1["dual_theta_prec"], L2["dual_theta_prec"]);
+        for i in [1..prec - 1] do
+            d := coeff(L1["dual_theta_series"], i) - coeff(L2["dual_theta_series"], i);
+            if (d ne 0) then return d; end if;
+        end for;
+    end if;
+    // 5. arbitrary tiebreaker: the (reduced) Gram matrix entries
+    for i in [1..n^2] do
+        d := L1["gram"][i] - L2["gram"][i];
+        if (d ne 0) then return d; end if;
+    end for;
+    return 0;
+end function;
+
 intrinsic FillGenus(label::MonStgElt : timeout := 1800, masslimit := 0, sizelimit := 0, timelimit := 0, adjlimit := 0, perlattice := 0, use_orth := true, force_orth := false, stats := false)
 {Fill the data for a genus and its lattice representatives, given files in the genera_basic format.
 
@@ -484,41 +533,6 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
 
     vprintf FillGenus, 1 : "Done!\n";
 
-    function cmp_lat(L1, L2)
-        // 1. automorphism group size (larger first)
-        if Type(L1["aut_size"]) eq RngIntElt and Type(L2["aut_size"]) eq RngIntElt then
-            d := L2["aut_size"] - L1["aut_size"];
-            if (d ne 0) then return d; end if;
-        end if;
-        // 2. density (denser first); within a genus the determinant is fixed, so we
-        //    sort by the minimum as a proxy (larger minimum = denser)
-        if Type(L1["minimum"]) eq RngIntElt and Type(L2["minimum"]) eq RngIntElt then
-            d := L2["minimum"] - L1["minimum"];
-            if (d ne 0) then return d; end if;
-        end if;
-        // 3. theta series
-        if Type(L1["theta_series"]) eq SeqEnum and Type(L2["theta_series"]) eq SeqEnum then
-            prec := Minimum(L1["theta_prec"], L2["theta_prec"]);
-            for i in [1..prec - 1] do
-                d := L1["theta_series"][i] - L2["theta_series"][i];
-                if (d ne 0) then return d; end if;
-            end for;
-        end if;
-        // 4. dual theta series
-        if Type(L1["dual_theta_series"]) eq SeqEnum and Type(L2["dual_theta_series"]) eq SeqEnum then
-            prec := Minimum(L1["dual_theta_prec"], L2["dual_theta_prec"]);
-            for i in [1..prec - 1] do
-                d := L1["dual_theta_series"][i] - L2["dual_theta_series"][i];
-                if (d ne 0) then return d; end if;
-            end for;
-        end if;
-        // 5. arbitrary tiebreaker: the (reduced) Gram matrix entries
-        for i in [1..n^2] do
-            d := L1["gram"][i] - L2["gram"][i];
-            if (d ne 0) then return d; end if;
-        end for;
-        return 0;
-    end function;
 
     // Tie breaker
 
