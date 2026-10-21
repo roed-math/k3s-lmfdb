@@ -213,7 +213,10 @@ def derive_certificates(embed_labels_dir, manifests_dir, disc_ratio, ranks):
     machinery), so the certified bound for a task at source rank n is the
     largest B such that every definite rank-n genus with det <= B was included
     (not excluded by build_embedding_inputs, not skipped by the loader) and the
-    covering job completed.  Returns {("overlat", n) | ("c1dom", n) |
+    covering job completed.  When the stage is chunked (expected_jobs.txt), a
+    chunk that did not complete caps the domain bound below its smallest det,
+    and a task certifies nothing if none of its chunks completed.
+    Returns {("overlat", n) | ("c1dom", n) |
     ("c1cod", n): B} with B = -1 when nothing is certified.
     """
     certs = {}
@@ -227,25 +230,61 @@ def derive_certificates(embed_labels_dir, manifests_dir, disc_ratio, ranks):
                 lab, det, _ = line.split("|")
                 m = min(m, int(det))
         excl_min[n] = m                              # smallest hole in the universe
-    def manifest_bound(name, want_ranks):
-        p = Path(manifests_dir) / name / "manifest.txt"
-        if not p.is_file():
-            return {r: -1 for r in want_ranks}       # job did not complete: nothing certified
+    expected = read_expected_jobs(embed_labels_dir)
+
+    def manifest_bound(name, dom_rank, want_ranks):
+        # One job per name when the stage was not chunked (or expected_jobs.txt is
+        # absent: output from before chunking); otherwise one job per det-sorted
+        # chunk of the domain genera.
+        chunks = expected.get(name) if expected is not None else [(name, None)]
+        if not chunks:
+            return {r: -1 for r in want_ranks}       # no job for this task/rank
         bound = {r: excl_min.get(r, 0) - 1 for r in want_ranks}
-        for line in p.read_text().splitlines()[1:]:
-            lab = line.strip()
-            if not lab:
+        done = 0
+        for jobtag, min_det in chunks:
+            p = Path(manifests_dir) / jobtag / "manifest.txt"
+            if not p.is_file():
+                if min_det is None:
+                    return {r: -1 for r in want_ranks}   # unchunked job did not complete
+                # A chunk that did not complete leaves its domain genera, all of
+                # det >= min_det (chunks are det-sorted), uncertified.
+                bound[dom_rank] = min(bound[dom_rank], min_det - 1)
                 continue
-            r = int(lab.split(".")[0])
-            if r in bound:
-                bound[r] = min(bound[r], label_det(lab) - 1)   # loader skipped it
+            done += 1
+            for line in p.read_text().splitlines()[1:]:
+                lab = line.strip()
+                if not lab:
+                    continue
+                r = int(lab.split(".")[0])
+                if r in bound:
+                    bound[r] = min(bound[r], label_det(lab) - 1)   # loader skipped it
+        if done == 0:
+            return {r: -1 for r in want_ranks}       # nothing completed: nothing certified
         return bound
     for n in ranks:
-        certs[("overlat", n)] = manifest_bound(f"overlat_rank{n}_all", [n])[n]
-        b = manifest_bound(f"corank1_rank{n}_all", [n, n + 1])
+        certs[("overlat", n)] = manifest_bound(f"overlat_rank{n}_all", n, [n])[n]
+        b = manifest_bound(f"corank1_rank{n}_all", n, [n, n + 1])
         certs[("c1dom", n)] = b[n]
         certs[("c1cod", n + 1)] = b[n + 1]
     return certs
+
+
+def read_expected_jobs(embed_labels_dir):
+    """embed_labels/expected_jobs.txt (written by run_all.py's
+    build_embedding_inputs): one "jobtag<TAB>min_det" line per chunked job, where
+    jobtag is "<task>_<list>.c<k>" and min_det the smallest det in its chunk.
+    Returns {"<task>_<list>": [(jobtag, min_det), ...]}, or None if the file is
+    absent (an unchunked run)."""
+    p = Path(embed_labels_dir) / "expected_jobs.txt"
+    if not p.is_file():
+        return None
+    out = defaultdict(list)
+    for line in p.read_text().splitlines():
+        if not line.strip():
+            continue
+        jobtag, min_det = line.split("\t")
+        out[jobtag.rsplit(".c", 1)[0]].append((jobtag, int(min_det)))
+    return out
 
 
 def resolve_candidates(candidates, lats, certs):

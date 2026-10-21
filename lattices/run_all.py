@@ -5,6 +5,7 @@ import sys
 import time
 import shutil
 import argparse
+import hashlib
 import subprocess
 import contextlib
 from collections import defaultdict
@@ -55,6 +56,7 @@ parser.add_argument("--embed-jobs", type=int, default=8, help="Parallel Julia wo
 parser.add_argument("--embed-classlimit", type=int, default=200, help="Skip genera with class number above this in the embedding stage (its cost grows with the class lists on both sides)")
 parser.add_argument("--embed-max-disc-ratio", type=int, default=0, help="Determinant cap C for the embedding stage, in the enumeration convention (rank n up to C/n); 0 = same as --max-disc-ratio")
 parser.add_argument("--embed-k3-min-rank", type=int, default=12, help="Lowest rank for the k3 task: the orthogonal complement inside the rank-22 K3 lattice has rank 22-n, and Oscar's embedding machinery has to enumerate its genus, which explodes as n decreases")
+parser.add_argument("--embed-chunk", type=int, default=200, help="Domain genera per embedding job.  Each task's domain genera are det-sorted and split into chunks of this size, one GNU parallel job each, so a timeout or OOM loses one chunk (and caps the completeness certificate just below that chunk's smallest det) instead of a whole rank or rank pair.  Finished chunks are committed atomically and skipped on a rerun without --clean.  Each job pays a fixed cost -- Julia/Oscar startup and compilation, plus loading its codomain or overlattice pool -- measured at ~270s per job on a loaded 32-core machine (94 chunks of 25 at R=4, D=120 cost 3.8x the 7 unchunked jobs in total job time), so keep chunks at well over that much work.")
 parser.add_argument("--embed-timelimit", type=int, default=3600, help="Wall-clock seconds per embedding job (enforced by GNU parallel --timeout; a killed job loses only its own task)")
 
 # Skip stages
@@ -175,8 +177,11 @@ def build_embedding_inputs(fname):
     embedding cap (C/rank, with the K3 extension C/(22-rank) for the k3 lists);
     the Julia loader re-verifies completeness (every class file on disk) before
     using a genus, so a qualifying-but-partially-stored genus is skipped there.
-    Jobs are one per rank (overlat, k3) or rank pair (corank1); finer batching
-    with per-unit resume markers is future work (oscar/INTEGRATION_PLAN.md)."""
+    Each task's domain genera are split into det-sorted chunks of --embed-chunk,
+    one job each (corank-1 jobs load the whole rank+1 pool as codomains); the
+    expected jobtags go to embed_labels/expected_jobs.txt for the certificate
+    derivation.  Returns (jobs to run, jobs expected): jobs already committed with
+    the same inputs are not rerun."""
     C = args.embed_max_disc_ratio or args.max_disc_ratio
     tasks = [t.strip() for t in args.embed_tasks.split(",") if t.strip()]
     basic_fmt = Path("genera_basic.format").read_text().strip().split("|")
@@ -224,34 +229,74 @@ def build_embedding_inputs(fname):
             lines.append(f"{lab}|{det}|{reason}")
         if lines:
             (labels_dir / f"rank{r}_excluded.txt").write_text("\n".join(lines) + "\n")
-    files = {}
+    files = {}                             # (task list, rank) -> [(chunk file, min det)]
+    pools = {}                             # rank -> full rank{r}_all.txt (corank-1 codomain pool)
+
+    def write_chunks(stem, labs):
+        # det-sorted chunks, so a chunk that does not finish caps the completeness
+        # certificate (refine_universality.derive_certificates) just below its own
+        # smallest det rather than voiding the whole rank
+        labs = sorted(labs, key=lambda lab: (int(lab.split(".")[2]), lab))
+        out = []
+        for k in range(0, len(labs), args.embed_chunk):
+            chunk = labs[k:k + args.embed_chunk]
+            p = labels_dir / f"{stem}.c{k // args.embed_chunk + 1:04d}.txt"
+            p.write_text("\n".join(chunk) + "\n")
+            out.append((p, int(chunk[0].split(".")[2])))
+        return out
+
     for r, recs in by_rank.items():
         base_cap = C // r
         labels = [lab for lab, _, _, d in recs if d <= base_cap]
         if labels:
             p = labels_dir / f"rank{r}_all.txt"
             p.write_text("\n".join(labels) + "\n")
-            files[r] = p
+            pools[r] = p
+            files[("all", r)] = write_chunks(f"rank{r}_all", labels)
         if "k3" in tasks and args.embed_k3_min_rank <= r <= 21:
             k3_cap = max(base_cap, C // (22 - r)) if (12 <= r <= 20 and not args.nokthree) else base_cap
             k3_labels = [lab for lab, nminus, is_even, d in recs
                          if is_even and nminus in (1, 2) and d <= k3_cap]
             if k3_labels:
-                p = labels_dir / f"rank{r}_k3.txt"
-                p.write_text("\n".join(k3_labels) + "\n")
-                files[(r, "k3")] = p
-    total = 0
+                files[("k3", r)] = write_chunks(f"rank{r}_k3", k3_labels)
+    jobs = []                              # (task, chunk file, second file or "-", min det)
+    for r in sorted(by_rank):
+        if "overlat" in tasks:
+            # overlattices are looked up in the whole rank, not just the chunk
+            jobs += [("overlat", p, pools[r], m) for p, m in files.get(("all", r), [])]
+        if "k3" in tasks:
+            jobs += [("k3", p, "-", m) for p, m in files.get(("k3", r), [])]
+        if "corank1" in tasks and (r + 1) in pools:
+            jobs += [("corank1", p, pools[r + 1], m) for p, m in files.get(("all", r), [])]
+    jobtag = lambda task, p: f"{task}_{p.stem}"
+    (labels_dir / "expected_jobs.txt").write_text(
+        "".join(f"{jobtag(t, p)}\t{m}\n" for t, p, _, m in jobs))
+    # Resume: the driver commits each finished job atomically to
+    # inclusions/data/<jobtag>/ with the sha1 of its inputs in the manifest.  Keep
+    # those, drop committed jobs this run does not expect (a different chunking or
+    # det cap would otherwise duplicate rows in lat_inclusions.tbl), and do not
+    # launch jobs that are already done -- each would pay ~30s of Oscar startup
+    # only for the driver to skip it.
+    expected = {jobtag(t, p) for t, p, _, _ in jobs}
+    data = Path("inclusions", "data")
+    if data.is_dir():
+        for d in data.iterdir():
+            if d.name not in expected:
+                shutil.rmtree(d)
+    total = done = 0
     with open(fname, "w") as Fout:
-        for r in sorted(by_rank):
-            if "overlat" in tasks and r in files:
-                Fout.write(f"overlat:{files[r]}:-\n")
-                total += 1
-            if "k3" in tasks and (r, "k3") in files:
-                Fout.write(f"k3:{files[(r, 'k3')]}:-\n")
-                total += 1
-            if "corank1" in tasks and r in files and (r + 1) in files:
-                Fout.write(f"corank1:{files[r]}:{files[r + 1]}\n")
-                total += 1
+        for t, p, p2, _ in jobs:
+            digest = hashlib.sha1("\0".join(Path(f).read_text() for f in [p, p2] if f != "-")
+                                  .encode()).hexdigest()
+            man = data / jobtag(t, p) / "manifest.txt"
+            if man.is_file() and f"inputs={digest}" in man.read_text().split("\n")[0].split():
+                done += 1
+                continue
+            Fout.write(f"{t}:{p}:{p2}\n")
+            total += 1
+    if done:
+        print(f"  {done} embedding jobs already committed with the same inputs; skipping them", flush=True)
+    return total, len(jobs)
     return total
 
 def julia_env():
@@ -425,18 +470,27 @@ def main():
         # corank-1 primitive embeddings and K3-embedding counts, assembled into
         # lat_inclusions.tbl.  Needs only the fill outputs, and runs last so the
         # slowest optional stage cannot delay the core tables.
-        ecount = build_embedding_inputs("embed_jobs.txt")
-        if ecount == 0:
+        ecount, etotal = build_embedding_inputs("embed_jobs.txt")
+        if etotal == 0:
             print("No embedding jobs in range; skipping embeddings", flush=True)
-        elif not check_oscar():
+        elif ecount > 0 and not check_oscar():
             print("WARNING: Julia/Oscar environment not ready (setup: lattices/README.md); skipping embeddings", flush=True)
         else:
-            with timed(f"Computing embeddings ({ecount} jobs)"):
-                parallel("embed_jobs.txt", "embed.joblog",
-                         ["--task", "{1}", "--labels-file", "{2}", "--labels-file2", "{3}",
-                          "--data-root", ".", "--out-root", "inclusions"],
-                         colsep=":", prog=["julia", "--project=oscar", "oscar/driver.jl"],
-                         jobs=args.embed_jobs, timeout=args.embed_timelimit, env=julia_env())
+            if ecount > 0:
+                with timed(f"Computing embeddings ({ecount} of {etotal} jobs)"):
+                    parallel("embed_jobs.txt", "embed.joblog",
+                             ["--task", "{1}", "--labels-file", "{2}", "--labels-file2", "{3}",
+                              "--data-root", ".", "--out-root", "inclusions"],
+                             colsep=":", prog=["julia", "--project=oscar", "oscar/driver.jl"],
+                             jobs=args.embed_jobs, timeout=args.embed_timelimit, env=julia_env())
+            unfinished = [line.split("\t")[0] for line in
+                          Path("embed_labels", "expected_jobs.txt").read_text().splitlines()
+                          if line and not Path("inclusions", "data", line.split("\t")[0], "manifest.txt").is_file()]
+            if unfinished:
+                print(f"  WARNING: {len(unfinished)} of {etotal} embedding jobs did not finish "
+                      f"(e.g. {', '.join(unfinished[:3])}); their domains are left out of "
+                      f"lat_inclusions and of the certificates.  Rerunning without --clean "
+                      f"(e.g. with --skip-list-genera --skip-enumerate-genera) resumes them.", flush=True)
             with timed("Writing lat_inclusions.tbl"):
                 wt = subprocess.run(["julia", "--startup-file=no", "oscar/write_table.jl",
                                      "--inclusions-root", "inclusions",
