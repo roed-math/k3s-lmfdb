@@ -118,9 +118,21 @@ intrinsic FindLabel(L::Lat : genus_data:=<>) -> MonStgElt
         genus_data := FindGenusData(L);
     end if;
     genus_hash, hash_func := Explode(genus_data);
-    by_hash := GetHashes(genus_hash, Rank(L), Signature(GramMatrix(L)));
+    nplus := Signature(GramMatrix(L));
+    by_hash := GetHashes(genus_hash, Rank(L), nplus);
+    label_pos := Index(hash_format, "label");
     if #by_hash eq 0 then
-        // No lattices stored for this genus
+        // Either no lattices are stored for this genus, or they carry no per-lattice
+        // hash: indefinite lattices never do (theta hashing needs a definite form), and
+        // load_hash_by_hash skips "\N" hashes, so every indefinite lattice used to get
+        // label "\N" here -- even I_{3,1}, its own dual.  The stored lattices of a
+        // genus are all of its classes or none, so a genus with a single stored row
+        // has class number 1 and that row is L's class.  With several classes we
+        // would need a spinor-genus test to tell them apart; leave those "\N".
+        rows := load_hash_rows(genus_hash, Rank(L), nplus);
+        if #rows eq 1 then
+            return rows[1][label_pos];
+        end if;
         return "\\N";
     elif #by_hash eq 1 then
         poss := Values(by_hash)[1];
@@ -143,7 +155,6 @@ intrinsic FindLabel(L::Lat : genus_data:=<>) -> MonStgElt
         end for;
         assert #found ne 0;
     end if;
-    label_pos := Index(hash_format, "label");
     return found[label_pos];
 end intrinsic;
 
