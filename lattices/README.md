@@ -45,7 +45,11 @@ pipe-separated columns of the corresponding records.
    Runs last (it is the slowest optional stage); controlled by the `--embed-*`
    flags (task list, det cap, class-number cap, worker count, per-job timeout —
    the corank-1 task is quadratic in the number of genera per rank, so start
-   with a small `--embed-max-disc-ratio`).  Skipped with a warning if the
+   with a small `--embed-max-disc-ratio`).  Each task's domain genera are split
+   into det-sorted chunks of `--embed-chunk`, one job each; a finished job is
+   committed atomically, so a timeout loses one chunk, and rerunning without
+   `--clean` (e.g. `--skip-list-genera --skip-enumerate-genera`) computes only
+   the jobs that did not finish.  Skipped with a warning if the
    Julia/Oscar environment is not set up.
 7. **Refine** (Python, [`oscar/refine_universality.py`](oscar/refine_universality.py),
    inline in `run_all.py`): a bottom-up bitset pass over the embedding poset —
