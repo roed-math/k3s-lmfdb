@@ -51,7 +51,7 @@ useorth := StringToInteger(useorth);
 forceorth := useorth ge 2;
 useorth := useorth ge 1;
 // warmlimit: wall-clock budget (seconds) for the batch cache pre-warm below.
-if not assigned warmlimit then warmlimit := "300"; end if;
+if not assigned warmlimit then warmlimit := "0"; end if;
 warmlimit := StringToInteger(warmlimit);
 
 // stats:=1 writes a per-genus fill_stats/ record (outcome, class number, timings);
@@ -74,7 +74,9 @@ procedure() // forcing magma to read the full input before forking
 // runs its enumeration inside a TimeoutCall fork, which inherits this
 // process's warm cache.  Failures here are non-fatal -- FillGenus enumerates
 // on its own if the cache is cold.
-if useorth and #label_list gt 1 then
+// warmlimit:=0 skips the pre-warm (the run_all.py default): its budget is only
+// checked at safe points, and a long C builtin can keep it running indefinitely.
+if useorth and #label_list gt 1 and warmlimit gt 0 then
     // The pre-warm cannot run under TimeoutCall (the fork would take the warmed
     // cache with it) and Alarm is uncatchable, so it is bounded by an internal
     // wall-clock budget instead: past warmlimit seconds the orth machinery raises
