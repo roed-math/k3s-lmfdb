@@ -5,6 +5,7 @@ import sys
 import time
 import shutil
 import argparse
+import hashlib
 import subprocess
 import contextlib
 from collections import defaultdict
@@ -15,6 +16,7 @@ from pathlib import Path
 # and a sage.symbolic.function circular import (via the genus mass computation).
 import sage.all  # noqa: F401
 from genus import write_all_of_sig_between_genera_basic
+from sage.parallel.decorate import parallel as sage_parallel
 
 @contextlib.contextmanager
 def timed(label):
@@ -46,7 +48,7 @@ parser.add_argument("--enum-timelimit", type=int, default=900, help="Maximum wal
 parser.add_argument("--enum-sizelimit", type=int, default=1000, help="For genera with class number larger than this, do not store individual lattices within the genus")
 parser.add_argument("--enum-adjlimit", type=int, default=0, help="Work budget for the adjacency (Hecke) matrix: skip it when the estimated work (~class_number * sum_p p^(rank-2) over the Hecke primes p) exceeds this; 0 = no budget, always attempt it.  Defaults to 0 because the estimate mis-prices reality badly -- at rank 7 the sum_p p^5 term crosses a 20000 budget at class number 6, yet a whole rank-7 genus fills in ~4s, so a budget of 20000 silently dropped Hecke data for 65 rank-7 genera (4.4%% of definite genera overall) that were never expensive.  AdjacencyMatrix now runs under a hard-killed TimeoutCall, which bounds it by measured time instead of a bad model; prefer that.  Set this only if you specifically want to skip adjacency without even trying.")
 parser.add_argument("--no-orth", action="store_true", help="Disable the orbit-method genus enumeration (use the p-neighbour walk only)")
-parser.add_argument("--warm-limit", type=int, default=300, help="Wall-clock budget (seconds) for each fill job's batch cache pre-warm.  The pre-warm runs in the parent Magma process (so forked per-genus enumerations inherit the warmed cache) and therefore cannot be bounded by TimeoutCall; past this budget it aborts at a safe point and the job continues with a partial cache plus the on-disk tier.")
+parser.add_argument("--warm-limit", type=int, default=0, help="Wall-clock budget (seconds) for each fill job's batch cache pre-warm (GenusRepresentativesOrthBatch over the batch's definite genera); 0 (the default) skips the pre-warm.  It runs in the batch's own Magma process, so forked per-genus enumerations inherit the warmed cache, and that is also why it cannot be bounded by TimeoutCall: the budget is only checked at safe points in the orth code, and a long call inside a C builtin never reaches one.  On the C=32768 calibration a rank-8 batch spent 25 h at 100%% CPU in it without finishing its first genus (each of whose fills takes ~2 min cold).  Its benefit is sharing descents within a batch; the rank-descending disk cache already supplies the parents, so it is off by default.  Set it (e.g. 300) only where batches hold many related definite genera.")
 
 # Embedding stage (Julia/Oscar; see oscar/INTEGRATION_PLAN.md and the README for setup)
 parser.add_argument("--embed-tasks", default="overlat,corank1,k3", help="Comma list of embedding computations: overlat (prime-index overlattices), corank1 (rank n -> n+1 primitive embeddings), k3 (primitive-embedding counts into the K3 lattice)")
@@ -54,11 +56,14 @@ parser.add_argument("--embed-jobs", type=int, default=8, help="Parallel Julia wo
 parser.add_argument("--embed-classlimit", type=int, default=200, help="Skip genera with class number above this in the embedding stage (its cost grows with the class lists on both sides)")
 parser.add_argument("--embed-max-disc-ratio", type=int, default=0, help="Determinant cap C for the embedding stage, in the enumeration convention (rank n up to C/n); 0 = same as --max-disc-ratio")
 parser.add_argument("--embed-k3-min-rank", type=int, default=12, help="Lowest rank for the k3 task: the orthogonal complement inside the rank-22 K3 lattice has rank 22-n, and Oscar's embedding machinery has to enumerate its genus, which explodes as n decreases")
+parser.add_argument("--embed-chunk", type=int, default=200, help="Domain genera per embedding job.  Each task's domain genera are det-sorted and split into chunks of this size, one GNU parallel job each, so a timeout or OOM loses one chunk (and caps the completeness certificate just below that chunk's smallest det) instead of a whole rank or rank pair.  Finished chunks are committed atomically and skipped on a rerun without --clean.  Each job pays a fixed cost -- Julia/Oscar startup and compilation, plus loading its codomain or overlattice pool -- measured at ~270s per job on a loaded 32-core machine (94 chunks of 25 at R=4, D=120 cost 3.8x the 7 unchunked jobs in total job time), so keep chunks at well over that much work.")
 parser.add_argument("--embed-timelimit", type=int, default=3600, help="Wall-clock seconds per embedding job (enforced by GNU parallel --timeout; a killed job loses only its own task)")
 
 # Skip stages
+parser.add_argument("--memlimit", type=int, default=32, help="Memory cap in GB for each Magma process in the fill and connect stages (SetMemoryLimit; 0 = none).  A job can hold two processes at once (the batch and a TimeoutCall child), so budget ~2x this per -j slot.  A child over the cap dies and that computation counts as failed; a batch process over it ends, and run_fill_genus.sh reports its unfinished genera.  Without a cap, rank-17 genera on the C=32768 census ran Magma processes up to 220 GB.")
+parser.add_argument("--fill-stats", action="store_true", help="Have FillGenus write one fill_stats/<rank>/<nplus>/<label> record per genus (fields in fill_stats.format): the outcome -- ok, or which guard decided it (mass_skip, enum_fail, size_skip, time_discard) -- the class number, per-phase wall-clock and the slowest single lattice.  Off by default (it is another file per genus); calibrate_fill.py turns it on.")
 parser.add_argument("--skip-list-genera", action="store_true", help="Assume that genera have already been listed")
-parser.add_argument("--skip-enumerate-genera", action="store_true", help="Assume that genera have already been enumerated (implies skip-list-genera)")
+parser.add_argument("--skip-enumerate-genera", action="store_true", help="Skip the fill stage (genus enumeration).  This does NOT imply --skip-list-genera: listing still runs unless that is also given, which is how the census listing was run (listing only, with --skip-embeddings).")
 parser.add_argument("--skip-embeddings", action="store_true", help="Do not compute primitive and K3 embedding data")
 parser.add_argument("--skip-tensor", action="store_true", help="Do not compute tensor product decompositions")
 parser.add_argument("--skip-names", action="store_true", help="Do not find lattice names")
@@ -173,8 +178,11 @@ def build_embedding_inputs(fname):
     embedding cap (C/rank, with the K3 extension C/(22-rank) for the k3 lists);
     the Julia loader re-verifies completeness (every class file on disk) before
     using a genus, so a qualifying-but-partially-stored genus is skipped there.
-    Jobs are one per rank (overlat, k3) or rank pair (corank1); finer batching
-    with per-unit resume markers is future work (oscar/INTEGRATION_PLAN.md)."""
+    Each task's domain genera are split into det-sorted chunks of --embed-chunk,
+    one job each (corank-1 jobs load the whole rank+1 pool as codomains); the
+    expected jobtags go to embed_labels/expected_jobs.txt for the certificate
+    derivation.  Returns (jobs to run, jobs expected): jobs already committed with
+    the same inputs are not rerun."""
     C = args.embed_max_disc_ratio or args.max_disc_ratio
     tasks = [t.strip() for t in args.embed_tasks.split(",") if t.strip()]
     basic_fmt = Path("genera_basic.format").read_text().strip().split("|")
@@ -222,34 +230,74 @@ def build_embedding_inputs(fname):
             lines.append(f"{lab}|{det}|{reason}")
         if lines:
             (labels_dir / f"rank{r}_excluded.txt").write_text("\n".join(lines) + "\n")
-    files = {}
+    files = {}                             # (task list, rank) -> [(chunk file, min det)]
+    pools = {}                             # rank -> full rank{r}_all.txt (corank-1 codomain pool)
+
+    def write_chunks(stem, labs):
+        # det-sorted chunks, so a chunk that does not finish caps the completeness
+        # certificate (refine_universality.derive_certificates) just below its own
+        # smallest det rather than voiding the whole rank
+        labs = sorted(labs, key=lambda lab: (int(lab.split(".")[2]), lab))
+        out = []
+        for k in range(0, len(labs), args.embed_chunk):
+            chunk = labs[k:k + args.embed_chunk]
+            p = labels_dir / f"{stem}.c{k // args.embed_chunk + 1:04d}.txt"
+            p.write_text("\n".join(chunk) + "\n")
+            out.append((p, int(chunk[0].split(".")[2])))
+        return out
+
     for r, recs in by_rank.items():
         base_cap = C // r
         labels = [lab for lab, _, _, d in recs if d <= base_cap]
         if labels:
             p = labels_dir / f"rank{r}_all.txt"
             p.write_text("\n".join(labels) + "\n")
-            files[r] = p
+            pools[r] = p
+            files[("all", r)] = write_chunks(f"rank{r}_all", labels)
         if "k3" in tasks and args.embed_k3_min_rank <= r <= 21:
             k3_cap = max(base_cap, C // (22 - r)) if (12 <= r <= 20 and not args.nokthree) else base_cap
             k3_labels = [lab for lab, nminus, is_even, d in recs
                          if is_even and nminus in (1, 2) and d <= k3_cap]
             if k3_labels:
-                p = labels_dir / f"rank{r}_k3.txt"
-                p.write_text("\n".join(k3_labels) + "\n")
-                files[(r, "k3")] = p
-    total = 0
+                files[("k3", r)] = write_chunks(f"rank{r}_k3", k3_labels)
+    jobs = []                              # (task, chunk file, second file or "-", min det)
+    for r in sorted(by_rank):
+        if "overlat" in tasks:
+            # overlattices are looked up in the whole rank, not just the chunk
+            jobs += [("overlat", p, pools[r], m) for p, m in files.get(("all", r), [])]
+        if "k3" in tasks:
+            jobs += [("k3", p, "-", m) for p, m in files.get(("k3", r), [])]
+        if "corank1" in tasks and (r + 1) in pools:
+            jobs += [("corank1", p, pools[r + 1], m) for p, m in files.get(("all", r), [])]
+    jobtag = lambda task, p: f"{task}_{p.stem}"
+    (labels_dir / "expected_jobs.txt").write_text(
+        "".join(f"{jobtag(t, p)}\t{m}\n" for t, p, _, m in jobs))
+    # Resume: the driver commits each finished job atomically to
+    # inclusions/data/<jobtag>/ with the sha1 of its inputs in the manifest.  Keep
+    # those, drop committed jobs this run does not expect (a different chunking or
+    # det cap would otherwise duplicate rows in lat_inclusions.tbl), and do not
+    # launch jobs that are already done -- each would pay ~30s of Oscar startup
+    # only for the driver to skip it.
+    expected = {jobtag(t, p) for t, p, _, _ in jobs}
+    data = Path("inclusions", "data")
+    if data.is_dir():
+        for d in data.iterdir():
+            if d.name not in expected:
+                shutil.rmtree(d)
+    total = done = 0
     with open(fname, "w") as Fout:
-        for r in sorted(by_rank):
-            if "overlat" in tasks and r in files:
-                Fout.write(f"overlat:{files[r]}:-\n")
-                total += 1
-            if "k3" in tasks and (r, "k3") in files:
-                Fout.write(f"k3:{files[(r, 'k3')]}:-\n")
-                total += 1
-            if "corank1" in tasks and r in files and (r + 1) in files:
-                Fout.write(f"corank1:{files[r]}:{files[r + 1]}\n")
-                total += 1
+        for t, p, p2, _ in jobs:
+            digest = hashlib.sha1("\0".join(Path(f).read_text() for f in [p, p2] if f != "-")
+                                  .encode()).hexdigest()
+            man = data / jobtag(t, p) / "manifest.txt"
+            if man.is_file() and f"inputs={digest}" in man.read_text().split("\n")[0].split():
+                done += 1
+                continue
+            Fout.write(f"{t}:{p}:{p2}\n")
+            total += 1
+    if done:
+        print(f"  {done} embedding jobs already committed with the same inputs; skipping them", flush=True)
+    return total, len(jobs)
     return total
 
 def julia_env():
@@ -295,6 +343,28 @@ def parallel(jobfile, joblog, prog_args, colsep=None, prog=None, jobs=None, time
     if result.returncode != 0:
         print(f"  WARNING: {result.returncode} job(s) failed (see {joblog}); continuing", flush=True)
 
+def audit_fill(jobfile, missing_file):
+    """Every genus fill attempted must leave a genera_advanced record -- even a genus a
+    guard stopped (masslimit, enum timeout, sizelimit, timelimit) gets its genus-level
+    row.  So a missing record means the genus was never written: a Magma error or a
+    crash.  That is invisible to null-scanning (there is no row to contain \\N), so list
+    those genera after each rank rather than leave them to be noticed downstream."""
+    missing = []
+    with open(jobfile) as F:
+        for line in F:
+            for label in line.strip().split(":"):
+                if not label:
+                    continue
+                rank, nplus = label.split(".")[:2]
+                if not Path("genera_advanced", rank, nplus, label).exists():
+                    missing.append(label)
+    if missing:
+        Path(missing_file).write_text("\n".join(missing) + "\n")
+        print(f"  WARNING: {len(missing)} genera have no genera_advanced record "
+              f"(listed in {missing_file}; retry with run_fill_genus.sh)", flush=True)
+    elif Path(missing_file).exists():
+        Path(missing_file).unlink()
+
 def clean_outputs():
     """Delete pipeline outputs so this run's data cannot be a mixture of several runs.
 
@@ -308,7 +378,7 @@ def clean_outputs():
     """
     targets = ["genera_advanced", "genera_hash", "lattice_basic_data",
                "lattice_advanced_data", "lattice_hashes", "voronoi", "shortest",
-               "orth_cache",   # stale cached genera would leak old counters/labels into provenance
+               "orth_cache", "fill_stats",   # stale cached genera would leak old counters/labels into provenance
                "inclusions", "embed_labels", "refine_sidecar"]
     if not args.skip_list_genera:
         targets.append("genera_basic")   # regenerated below; otherwise it is this run's input
@@ -318,7 +388,8 @@ def clean_outputs():
         if p.is_dir():
             removed.append(f"{t} ({sum(1 for q in p.rglob('*') if q.is_file())} files)")
             shutil.rmtree(p)
-    for f in [Path("atomic_names"), Path("lat_inclusions.tbl")] + sorted(Path(".").glob("atomic_names_partial_*")):
+    for f in ([Path("atomic_names"), Path("lat_inclusions.tbl")] + sorted(Path(".").glob("atomic_names_partial_*"))
+              + sorted(Path(".").glob("fill_missing_*.txt"))):
         if f.exists():
             f.unlink()
             removed.append(f.name)
@@ -338,7 +409,11 @@ def main():
         start_time = time.monotonic()
         print(f"Listing genera ({total} tasks)...")
 
-        for i, res in enumerate(write_all_of_sig_between_genera_basic(inputs), 1):
+        # genus.py decorates the lister with @parallel(ncpus=128); rewrap the undecorated
+        # function so the Sage worker pool honours -j instead (on a 32-core machine the
+        # fixed 128 oversubscribed it 4x, and nothing else in the run bounded it).
+        lister = sage_parallel(ncpus=args.jobs)(write_all_of_sig_between_genera_basic.func)
+        for i, res in enumerate(lister(inputs), 1):
             elapsed = time.monotonic() - start_time
             avg_time = elapsed / i
             eta = avg_time * (total - i)
@@ -382,25 +457,42 @@ def main():
                           f"perlattice:={args.enum_per_lattice_timeout}",
                           f"useorth:={0 if args.no_orth else 1}",
                           f"warmlimit:={args.warm_limit}",
-                          "labels:={1}", "run_fill_genus.m"])
+                          f"stats:={1 if args.fill_stats else 0}",
+                          f"memlimit:={args.memlimit}",
+                          "labels:={1}"],
+                         # The wrapper adds done:=1 and checks that every label in the
+                         # batch printed DONE or ERROR, so a Magma segfault (which can
+                         # exit 0) shows up as ERROR lines and a failed job instead of
+                         # silently missing genera.
+                         prog=["./run_fill_genus.sh"])
+            audit_fill(f"genus_jobs_{r}.txt", f"fill_missing_{r}.txt")
 
     if not args.skip_embeddings:
         # Julia/Oscar embedding stage (oscar/INTEGRATION_PLAN.md): overlattices,
         # corank-1 primitive embeddings and K3-embedding counts, assembled into
         # lat_inclusions.tbl.  Needs only the fill outputs, and runs last so the
         # slowest optional stage cannot delay the core tables.
-        ecount = build_embedding_inputs("embed_jobs.txt")
-        if ecount == 0:
+        ecount, etotal = build_embedding_inputs("embed_jobs.txt")
+        if etotal == 0:
             print("No embedding jobs in range; skipping embeddings", flush=True)
-        elif not check_oscar():
+        elif ecount > 0 and not check_oscar():
             print("WARNING: Julia/Oscar environment not ready (setup: lattices/README.md); skipping embeddings", flush=True)
         else:
-            with timed(f"Computing embeddings ({ecount} jobs)"):
-                parallel("embed_jobs.txt", "embed.joblog",
-                         ["--task", "{1}", "--labels-file", "{2}", "--labels-file2", "{3}",
-                          "--data-root", ".", "--out-root", "inclusions"],
-                         colsep=":", prog=["julia", "--project=oscar", "oscar/driver.jl"],
-                         jobs=args.embed_jobs, timeout=args.embed_timelimit, env=julia_env())
+            if ecount > 0:
+                with timed(f"Computing embeddings ({ecount} of {etotal} jobs)"):
+                    parallel("embed_jobs.txt", "embed.joblog",
+                             ["--task", "{1}", "--labels-file", "{2}", "--labels-file2", "{3}",
+                              "--data-root", ".", "--out-root", "inclusions"],
+                             colsep=":", prog=["julia", "--project=oscar", "oscar/driver.jl"],
+                             jobs=args.embed_jobs, timeout=args.embed_timelimit, env=julia_env())
+            unfinished = [line.split("\t")[0] for line in
+                          Path("embed_labels", "expected_jobs.txt").read_text().splitlines()
+                          if line and not Path("inclusions", "data", line.split("\t")[0], "manifest.txt").is_file()]
+            if unfinished:
+                print(f"  WARNING: {len(unfinished)} of {etotal} embedding jobs did not finish "
+                      f"(e.g. {', '.join(unfinished[:3])}); their domains are left out of "
+                      f"lat_inclusions and of the certificates.  Rerunning without --clean "
+                      f"(e.g. with --skip-list-genera --skip-enumerate-genera) resumes them.", flush=True)
             with timed("Writing lat_inclusions.tbl"):
                 wt = subprocess.run(["julia", "--startup-file=no", "oscar/write_table.jl",
                                      "--inclusions-root", "inclusions",
@@ -497,10 +589,10 @@ def main():
         # are flat and fully parallel; the only barrier is between them.
         with timed("Connecting genera (pass 1: produce)"):
             parallel("genus_jobs.txt", "connect1.joblog",
-                     ["labels:={1}", "phase:=1", "run_connect_genus.m"])
+                     ["labels:={1}", "phase:=1", f"memlimit:={args.memlimit}", "run_connect_genus.m"])
         with timed("Connecting genera (pass 2: consume)"):
             parallel("genus_jobs.txt", "connect2.joblog",
-                     ["labels:={1}", "phase:=2", "run_connect_genus.m"])
+                     ["labels:={1}", "phase:=2", f"memlimit:={args.memlimit}", "run_connect_genus.m"])
 
 
 if __name__ == "__main__":

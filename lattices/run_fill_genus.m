@@ -2,6 +2,7 @@
 // Usage: magma -b label:=foo run_fill_genus.m
 // Batch: magma -b labels:=foo:bar:baz run_fill_genus.m
 // Options: timeout:=N (default 60, seconds per label)
+//          stats:=1 (write a fill_stats/ record per genus, for calibration)
 //          done:=1 (print DONE sentinel per label, for wrapper scripts)
 //
 // Parallel across servers:
@@ -16,6 +17,11 @@
 SetQuitOnError(true);
 AttachSpec("lattices.spec");
 
+// memlimit:=G caps this process (and every TimeoutCall child it forks) at G GB of
+// memory; 0 = no cap.  A child over the cap dies and its computation counts as
+// failed; the parent over the cap ends the batch, which run_fill_genus.sh reports.
+if not assigned memlimit then memlimit := "0"; end if;
+if StringToInteger(memlimit) gt 0 then SetMemoryLimit(StringToInteger(memlimit) * 2^30); end if;
 if not assigned verbose then verbose := "0"; end if;
 SetVerbose("FillGenus", StringToInteger(verbose));
 SetVerbose("GenusReps", StringToInteger(verbose));
@@ -45,8 +51,13 @@ useorth := StringToInteger(useorth);
 forceorth := useorth ge 2;
 useorth := useorth ge 1;
 // warmlimit: wall-clock budget (seconds) for the batch cache pre-warm below.
-if not assigned warmlimit then warmlimit := "300"; end if;
+if not assigned warmlimit then warmlimit := "0"; end if;
 warmlimit := StringToInteger(warmlimit);
+
+// stats:=1 writes a per-genus fill_stats/ record (outcome, class number, timings);
+// see FillGenus and calibrate_fill.py.
+if not assigned stats then stats := "0"; end if;
+stats := StringToInteger(stats) ne 0;
 
 if not assigned done then done := "0"; end if;
 done := StringToInteger(done) ne 0;
@@ -63,7 +74,9 @@ procedure() // forcing magma to read the full input before forking
 // runs its enumeration inside a TimeoutCall fork, which inherits this
 // process's warm cache.  Failures here are non-fatal -- FillGenus enumerates
 // on its own if the cache is cold.
-if useorth and #label_list gt 1 then
+// warmlimit:=0 skips the pre-warm (the run_all.py default): its budget is only
+// checked at safe points, and a long C builtin can keep it running indefinitely.
+if useorth and #label_list gt 1 and warmlimit gt 0 then
     // The pre-warm cannot run under TimeoutCall (the fork would take the warmed
     // cache with it) and Alarm is uncatchable, so it is bounded by an internal
     // wall-clock budget instead: past warmlimit seconds the orth machinery raises
@@ -103,7 +116,7 @@ failed := [];
 for l in label_list do
     if done then printf "START: %o\n", l; end if;
     try
-        FillGenus(l : timeout := timeout, masslimit := masslimit, sizelimit := sizelimit, timelimit := timelimit, adjlimit := adjlimit, perlattice := perlattice, use_orth := useorth, force_orth := forceorth);
+        FillGenus(l : timeout := timeout, masslimit := masslimit, sizelimit := sizelimit, timelimit := timelimit, adjlimit := adjlimit, perlattice := perlattice, use_orth := useorth, force_orth := forceorth, stats := stats);
         if done then printf "DONE: %o\n", l; end if;
     catch e
         printf "ERROR: %o: %o\n", l, e;

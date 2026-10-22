@@ -181,6 +181,9 @@ function minimize_vector_set(VA, G, L)
     assert false;
 end function;
 
+// Largest characteristic vector set CanonicalForm will work with (see V_best_with_dual).
+MaxCharVectors := 4096;
+
 function V_best_with_dual(A)
     // We want to track the transformations, so we create the dual by hand
     // Ld, Td := LLL(Dual(LatticeWithGram(A)));
@@ -192,8 +195,14 @@ function V_best_with_dual(A)
     mats := [A, Ad];
     is_dual := [false, true];
     VAs := [];
-    // max := Infinity();
-    max := 2^20;
+    // Cap on the characteristic vector set.  Everything downstream is quadratic in
+    // its size (W = B*A*B^t and T1's matrix are #VA x #VA over Q, then a canonical
+    // graph labelling on ~#VA*log #VA vertices), and the cap used to start at 2^20
+    // and double: on the C=32768 census a rank-17 lattice reached 33250 vectors, a
+    // 1.1e9-entry matrix, with Magma processes at 130-220 GB.  Past the cap we fail
+    // at once -- the same outcome as a CanonicalForm timeout (no canonical gram) --
+    // instead of allocating it.
+    max := MaxCharVectors;
     found := false;
     vprintf CanonicalForm, 1: "Finding best characteristic vector set...";
     while not found do
@@ -215,7 +224,7 @@ function V_best_with_dual(A)
             vprintf CanonicalForm, 3 : "Done!";
          end for;
          vprintf CanonicalForm, 2 :"Done!"; 
-         max := 2*Maximum([#VA[1] : VA in VAs]);
+         error if not found, Sprintf("CanonicalForm: no characteristic vector set of at most %o vectors", MaxCharVectors);
     end while;
     vprintf CanonicalForm, 1 : "Done!\n";
     sorted, perm := Sort(VAs, func<x,y | #x[1]-#y[1]>);

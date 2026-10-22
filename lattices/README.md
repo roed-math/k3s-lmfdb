@@ -45,7 +45,11 @@ pipe-separated columns of the corresponding records.
    Runs last (it is the slowest optional stage); controlled by the `--embed-*`
    flags (task list, det cap, class-number cap, worker count, per-job timeout —
    the corank-1 task is quadratic in the number of genera per rank, so start
-   with a small `--embed-max-disc-ratio`).  Skipped with a warning if the
+   with a small `--embed-max-disc-ratio`).  Each task's domain genera are split
+   into det-sorted chunks of `--embed-chunk`, one job each; a finished job is
+   committed atomically, so a timeout loses one chunk, and rerunning without
+   `--clean` (e.g. `--skip-list-genera --skip-enumerate-genera`) computes only
+   the jobs that did not finish.  Skipped with a warning if the
    Julia/Oscar environment is not set up.
 7. **Refine** (Python, [`oscar/refine_universality.py`](oscar/refine_universality.py),
    inline in `run_all.py`): a bottom-up bitset pass over the embedding poset —
@@ -85,6 +89,10 @@ After cloning, fetch the Magma dependencies
 ```sh
 git submodule update --init
 ```
+
+`Parallel.magma` points at `roed-math/Parallel.magma` (branch `fast-hardkill`):
+the pinned `TimeoutCall` HardKill watchdog is not in `edgarcosta/Parallel.magma`.
+In a clone made before that change, run `git submodule sync` first.
 
 ### Magma
 
@@ -145,8 +153,39 @@ A suite that calls anything forking via `TimeoutCall` must wrap its body in
 child's exit moves the parent's read position in the script file, and the
 parent then misparses the rest of it.  Note also that `TimeoutCall`'s
 child-side `Alarm` cannot interrupt a single long C-level call; pass
-`HardKill := true` (a watchdog that SIGKILLs the child) for anything that may
-enter one — see `Parallel.magma/TimeoutCall.m`.
+`HardKill := true` (a watchdog that SIGKILLs the child, ~10 ms per call) for
+anything that may enter one — see `Parallel.magma/TimeoutCall.m`.
+
+## Calibrating the fill stage
+
+The fill guards (`--enum-*`) and the batch weights (`genus_work` in
+`run_all.py`) were tuned at C=256.  [`calibrate_fill.py`](calibrate_fill.py)
+measures them against a listed census.  Use a separate checkout (every stage
+writes under `lattices/`), on the machine the census will run on, with load
+comparable to production:
+
+```sh
+cd lattices
+# 1. stratified sample: N genera per (rank, nminus, floor(log2 det)), copied into
+#    ./genera_basic, plus the census population of every stratum
+python3 calibrate_fill.py sample --census /path/to/census --per-stratum 4 --ranks 1-32
+# 2. fill the sample with per-genus stats (here: the production guards)
+sage -python run_all.py --skip-list-genera --clean --fill-stats -j 32 \
+    --skip-embeddings --skip-tensor --skip-names --skip-connect
+# 3. per-stratum outcomes, time quantiles, class numbers, slowest lattice, and
+#    census CPU-hours extrapolated from the stratum populations
+python3 calibrate_fill.py report > calibration_report.txt
+```
+
+`--clean` here leaves the sampled `genera_basic/` alone (it is the input when
+`--skip-list-genera` is given).  Each `fill_stats/` record gives the outcome
+(`ok`, or the guard that decided it: `mass_skip`, `enum_fail`, `size_skip`,
+`time_discard`), so one pilot with the production guards shows what coverage
+they give; a second pass with generous guards on the strata where they trip
+measures what those strata actually cost (a tripped guard is a censored
+observation: its time is a lower bound).  Sampled genera start with a cold orth
+cache (their rank+1 parents are not filled first, as they are in production),
+so enumeration times are upper bounds.
 
 ## Universality and regularity columns
 

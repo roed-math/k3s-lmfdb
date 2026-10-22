@@ -33,11 +33,87 @@ Q := Rationals();
  * Wrappers for the individual enumeration methods (moved from fill_genus.m)
  ****************************************************************************/
 
+// Isometry (GL2(Z)-equivalence, proper or improper) of two indefinite binary
+// lattices of the same non-square discriminant.  Magma's IsEquivalent on binary
+// quadratic forms is PROPER equivalence; f is improperly equivalent to g iff it is
+// properly equivalent to g's mirror (a, -b, c).
+function binary_isometric(G1, G2)
+    D := 4*(G1[1,2]^2 - G1[1,1]*G1[2,2]);
+    Q := BinaryQuadraticForms(D);
+    f := Q!<Integers()!G1[1,1], Integers()!(2*G1[1,2]), Integers()!G1[2,2]>;
+    g := Q!<Integers()!G2[1,1], Integers()!(2*G2[1,2]), Integers()!G2[2,2]>;
+    gm := Q!<Integers()!G2[1,1], -Integers()!(2*G2[1,2]), Integers()!G2[2,2]>;
+    return IsEquivalent(f, g) or IsEquivalent(f, gm);
+end function;
+
+// Complete isometry invariant of a rank-2 lattice of square determinant -m^2.  A
+// primitive isotropic vector w extends to a basis (w, v) with Gram [[0, p], [p, q]],
+// and det = -p^2 forces p = m (v -> -v makes it +m); v is determined up to adding
+// multiples of w, which shifts q by multiples of 2m, so q mod 2m is an invariant of
+// the lattice with that isotropic line.  There are exactly two isotropic lines, so
+// the smaller of the two values is an invariant of the lattice -- it is the k of the
+// canonical [[0, m], [m, k]] that genus_reps_square_disc stores, up to
+// square_disc_isometric.
+function square_disc_key(G)
+    G := ChangeRing(G, Integers());
+    a := G[1,1]; b := G[1,2]; c := G[2,2];
+    m := Isqrt(b^2 - a*c);
+    if a eq 0 then
+        iso := [Vector(Integers(), [1, 0]), Vector(Integers(), [-c, 2*b])];
+    else
+        iso := [Vector(Integers(), [-b + m, a]), Vector(Integers(), [-b - m, a])];
+    end if;
+    ks := [];
+    for w0 in iso do
+        if IsZero(w0) then continue; end if;
+        w := w0 div GCD(Eltseq(w0));
+        row := Vector(Integers(), Eltseq(Matrix(w) * G));        // v -> <w, v>
+        _, x, y := XGCD(w[1], w[2]);                             // x w1 + y w2 = 1
+        v := Vector(Integers(), [-y, x]);                        // det(w, v) = 1
+        pv := (Matrix(v) * Transpose(Matrix(row)))[1][1];        // <w, v> = +-m
+        if pv lt 0 then v := -v; end if;
+        q := (Matrix(v) * G * Transpose(Matrix(v)))[1][1];
+        Append(~ks, q mod (2*m));
+    end for;
+    return Min(ks);
+end function;
+
+intrinsic IsIsometricBinary(L1::Lat, L2::Lat) -> BoolElt
+{Isometry of two indefinite rank-2 lattices of the same determinant (proper or
+improper).  Magma's IsIsometric needs a definite form.}
+    G1 := GramMatrix(L1); G2 := GramMatrix(L2);
+    require Rank(L1) eq 2 and Rank(L2) eq 2 : "rank-2 lattices only";
+    require Determinant(G1) eq Determinant(G2) and Determinant(G1) lt 0 :
+        "indefinite lattices of the same determinant only";
+    if IsSquare(-Determinant(G1)) then
+        return square_disc_key(G1) eq square_disc_key(G2);
+    end if;
+    return binary_isometric(G1, G2);
+end intrinsic;
+
 function genus_reps_Magma(L)
     // The bound is set to infinity to avoid Magma printing an error message
     // without throwing a runtime error.
     if IsPositiveDefinite(GramMatrix(L)) or (Rank(L) eq 2) then
-      return GenusRepresentatives(L : Bound := Infinity());
+      reps := GenusRepresentatives(L : Bound := Infinity());
+      // For indefinite binary lattices GenusRepresentatives can return two PROPER
+      // classes that are mirror images (a, b, c) and (a, -b, c) of each other, i.e.
+      // the same lattice: the genus of x^2 - 37y^2 came back with 3 representatives
+      // but has 2 isometry classes, so class_number was too large and one lattice
+      // was stored twice under two labels.  Keep one representative per isometry
+      // class.  (Square discriminants never get here -- genus_reps_square_disc --
+      // and the definite case already returns isometry classes.)
+      G := GramMatrix(L);
+      if Rank(L) eq 2 and not IsPositiveDefinite(G) and not IsPositiveDefinite(-G) then
+        kept := [];
+        for R in reps do
+          if not exists{K : K in kept | binary_isometric(GramMatrix(R), GramMatrix(K))} then
+            Append(~kept, R);
+          end if;
+        end for;
+        reps := kept;
+      end if;
+      return reps;
     end if;
     // due to some bugs in Magma, we convert to number field
     LF := NumberFieldLattice(L);

@@ -9,6 +9,12 @@
 # the rank+1 codomain genus pool.  Options: --data-root DIR (default "."),
 # --out-root DIR (default "inclusions").
 #
+# Resume: a job whose committed directory already holds a manifest recording the
+# same inputs (sha1 of its label files) is skipped, so rerunning the embedding
+# stage only computes the jobs that did not finish.  run_all.py splits each task's
+# domain genera into det-sorted chunks (--embed-chunk), one job each, so a timeout
+# or OOM loses one chunk rather than a whole rank or rank pair.
+#
 # Output layout (LabelPath sharding, keyed by the DOMAIN lattice label):
 #   <out-root>/<rank>/<nplus>/<domain_label>/{prim_emb.txt, overlat.txt, k3_embed.txt}
 # The line formats inside are Stevell's; write_table.jl assembles the
@@ -17,6 +23,7 @@
 # the rank-in-filename parse that breaks for rank >= 10, and the flat data/rankN
 # layout that puts every label in one directory.
 
+using SHA
 include(joinpath(@__DIR__, "load_local.jl"))
 include(joinpath(@__DIR__, "code", "lmfdb_lattice_enum.jl"))
 
@@ -148,6 +155,114 @@ function _primitive_embeddings_lmfdb(
   return nothing
 end
 
+# Copy of the vendored _prime_index_overlattices_lmfdb that iterates over the
+# domain genera Gs but looks overlattices up in `pool` (every genus of the rank).
+# The vendored routine searches Gs itself, which is right only when Gs is the whole
+# rank: an overlattice has the same rank and a smaller det, so with det-sorted
+# chunks its genus is usually in an earlier chunk, and the row was dropped (983 of
+# 32710 rows at R=4, D=120).  Only the lookups (findfirst, pool[k]) differ from the
+# vendored code.
+function _prime_index_overlattices_pool(
+  Gs::Vector{ZZGenus},
+  pool::Vector{ZZGenus},
+  _save_path::String
+)
+  for G in Gs
+    q = discriminant_group(G)
+    o = order(q)
+    # In those cases, the discriminant group has no
+    # isotropic vectors so we can skip this part
+    if isone(o)
+      continue
+    elseif radical(o) == o
+      continue
+    end
+    # We want any integral overlattice, so in the
+    # even case, we see the discriminant group as
+    # a finite bilinear form
+    if is_even(G)
+      q = Hecke._as_finite_bilinear_module(q)
+    end
+    # Any prime index overlattice has index in pds
+    pds = prime_divisors(last(elementary_divisors(q)))
+    D = Dict{eltype(pds), Tuple{TorQuadModule, Vector{Tuple{TorQuadModuleMap, GAPGroupHomomorphism}}}}()
+    for p in pds
+      qp, _ = torsion_subgroup(q, p)
+      # Function to compute 1-dimensional isotropic subspace
+      # of the p-torsion part of the discriminant group
+      r = Oscar._stabilizer_isotropic_elementary(qp, 1)
+      D[p] = (qp, r)
+    end
+    # We have done the computations "locally", we can now
+    # transport them to every lattice in the genus and
+    # split orbits under the action of the respective
+    # orthogonal groups
+    for M in get_attribute(G, :representatives)
+      GM, _ = image_in_Oq(M)
+      # Keep track of the label of M for storage
+      label_bottom = get_attribute(M, :lmfdb_label)
+      T = domain(GM)
+      if is_even(G)
+        T = Hecke._as_finite_bilinear_module(T)
+        GM = Oscar._orthogonal_group(T, matrix.(gens(GM)); check=false)
+      end
+      for p in pds
+        K = GF(p)
+        _v = zeros(K, degree(M))
+        qp, tmp = D[p]
+        is_empty(tmp) && continue
+        Tp, TpinT = torsion_subgroup(T, p)
+        OTp = orthogonal_group_bilinear(Tp)
+        iso = isomorphism(PermGroup, OTp)
+        Gp, _ = restrict_automorphism_group(GM, TpinT; check=false)
+        isoGp, _ = iso(Gp)
+        ok, phi = is_isometric_with_isometry(Tp, qp)
+        @assert ok # Should always be true
+        iphi = inv(phi)
+        for (Hinqp, j) in tmp
+          # Recover a representative for an O(q)-orbit of 1-dimensional
+          # isotropic F_p-vector space
+          _H, _HinTp = sub(Tp, elem_type(Tp)[phi\(qp(lift(a))) for a in gens(domain(Hinqp))])
+          _, jTp = sub(codomain(iso), elem_type(codomain(iso))[iso(OTp(phi * hom(j(g)) * iphi; check=false)) for g in gens(domain(j))])
+          # Split the O(q)-orbit into O(M)-orbits
+          for _h in double_cosets(codomain(iso), domain(jTp), isoGp)
+            h = iso\(representative(_h))
+            _Hh, _ = sub(Tp, [h(Tp(lift(a))) for a in gens(_H)])
+            L = cover(_Hh)
+            # L is the overlattice obtained by adding a generator of
+            # _Hh to M. We choose a reduced generator by multiplying
+            # coordinates by p (so they are integers) and reduce them
+            # modulo p (works because the basis matrix of M is the
+            # identity so any vector with integral coordinates lies
+            # in M)
+            map!(K ∘numerator, _v, p*lift(first(gens(_Hh))))
+            G2 = genus(L)
+            # Try to recover L in the list G2: technically, since we
+            # aim to choose Gs to contain all lattices up to a certain
+            # determinant bound (in absolute value), the genus of L
+            # should be in Gs. Only exception: the genus of L is not
+            # yet known to be enumerated so we have already discarded it
+            k = findfirst(isequal(G2), pool)
+            isnothing(k) && continue
+            # Recover the LMFDB label of L
+            if length(get_attribute(pool[k], :representatives)) == 1
+              label_top = get_attribute(only(get_attribute(pool[k], :representatives)), :lmfdb_label)
+            else
+              for L2 in get_attribute(pool[k], :representatives)
+                !is_isometric(L, L2) && continue
+                label_top = get_attribute(L2, :lmfdb_label)
+              end
+            end
+            __x = (label_bottom, label_top, p, _v)
+            save_data_lmfdb(_save_path, __x)
+          end
+        end
+      end
+    end
+  end
+  return nothing
+end
+
 # ---- argument parsing ----
 
 function parse_args(args)
@@ -163,7 +278,25 @@ function parse_args(args)
     return opts
 end
 
+function inputs_digest(opts)
+    files = [opts["labels-file"]]
+    haskey(opts, "labels-file2") && opts["labels-file2"] != "-" && push!(files, opts["labels-file2"])
+    return bytes2hex(sha1(join([read(f, String) for f in files], "\0")))
+end
+
+# The first manifest line is "key=value key=value ..."; return the value of key.
+function manifest_field(path, key)
+    isfile(path) || return nothing
+    for kv in split(first(eachline(path)))
+        k, _, v = partition_kv(kv)
+        k == key && return v
+    end
+    return nothing
+end
+partition_kv(kv) = (i = findfirst('=', kv); isnothing(i) ? (kv, "", "") : (kv[1:i-1], "=", kv[i+1:end]))
+
 function main()
+    t0 = time()
     opts = parse_args(ARGS)
     task = opts["task"]
     root = opts["data-root"]
@@ -175,14 +308,33 @@ function main()
     jobtag = string(task, "_", replace(basename(opts["labels-file"]), ".txt" => ""))
     stage = joinpath(opts["out-root"], "staging", jobtag)
     committed = joinpath(opts["out-root"], "data", jobtag)
+    digest = inputs_digest(opts)
+    if manifest_field(joinpath(committed, "manifest.txt"), "inputs") == digest
+        println("SKIP task=$task job=$jobtag (already committed with the same inputs)")
+        return
+    end
     ispath(stage) && rm(stage; recursive = true)
     mkpath(stage)
     out = stage
     labels = filter(!isempty, strip.(readlines(opts["labels-file"])))
-    Gs, skipped = load_genera(root, String.(labels))
+    has_pool = get(opts, "labels-file2", "-") != "-"
+    if task == "overlat" && has_pool
+        # Load the rank's pool once and take this chunk's domains from it.
+        pool_labels = filter(!isempty, strip.(readlines(opts["labels-file2"])))
+        pool, pool_skipped = load_genera(root, String.(pool_labels))
+        mine = Set(labels)
+        glab(G) = join(split(String(get_attribute(first(get_attribute(G, :representatives)), :lmfdb_label)), ".")[1:end-1], ".")
+        Gs = filter(G -> glab(G) in mine, pool)
+        # skipped: this chunk's unloadable domains plus the pool's other ones
+        # (overlattices into those genera cannot be labelled)
+        skipped = pool_skipped
+    else
+        Gs, skipped = load_genera(root, String.(labels))
+    end
     n_skipped = length(skipped)
     if task == "overlat"
-        isempty(Gs) || _prime_index_overlattices_lmfdb(Gs, out)
+        isempty(Gs) || (has_pool ? _prime_index_overlattices_pool(Gs, pool, out)
+                                 : _prime_index_overlattices_lmfdb(Gs, out))
     elseif task == "k3"
         isempty(Gs) || _embeddings_in_K3_lattice(Gs, out)
     elseif task == "corank1"
@@ -207,7 +359,8 @@ function main()
     # (oscar/refine_universality.py) can cap the certified det range below the
     # smallest skipped genus.
     open(joinpath(stage, "manifest.txt"), "w") do f
-        write(f, "task=$task loaded=$(length(Gs)) skipped=$(n_skipped)\n")
+        # (fields after skipped= are informational; readers take lines 2.. as labels)
+        write(f, "task=$task loaded=$(length(Gs)) skipped=$(n_skipped) inputs=$digest seconds=$(round(time() - t0; digits = 1))\n")
         for s in skipped
             write(f, s, "\n")
         end
