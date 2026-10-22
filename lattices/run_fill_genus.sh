@@ -22,6 +22,10 @@
 #     :::: labels.txt
 
 set -u
+# sort and comm must agree on the order; labels like 4.4.10.63 collate differently
+# across locales (and between GNU and uutils coreutils), and a mismatch would
+# misreport unfinished genera.  Compare bytes.
+export LC_ALL=C
 
 if [[ "${1:-}" == *":="* ]]; then
     magma_args=("$@")

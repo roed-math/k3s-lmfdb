@@ -17,6 +17,11 @@
 SetQuitOnError(true);
 AttachSpec("lattices.spec");
 
+// memlimit:=G caps this process (and every TimeoutCall child it forks) at G GB of
+// memory; 0 = no cap.  A child over the cap dies and its computation counts as
+// failed; the parent over the cap ends the batch, which run_fill_genus.sh reports.
+if not assigned memlimit then memlimit := "0"; end if;
+if StringToInteger(memlimit) gt 0 then SetMemoryLimit(StringToInteger(memlimit) * 2^30); end if;
 if not assigned verbose then verbose := "0"; end if;
 SetVerbose("FillGenus", StringToInteger(verbose));
 SetVerbose("GenusReps", StringToInteger(verbose));

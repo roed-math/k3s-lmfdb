@@ -60,6 +60,7 @@ parser.add_argument("--embed-chunk", type=int, default=200, help="Domain genera 
 parser.add_argument("--embed-timelimit", type=int, default=3600, help="Wall-clock seconds per embedding job (enforced by GNU parallel --timeout; a killed job loses only its own task)")
 
 # Skip stages
+parser.add_argument("--memlimit", type=int, default=32, help="Memory cap in GB for each Magma process in the fill and connect stages (SetMemoryLimit; 0 = none).  A job can hold two processes at once (the batch and a TimeoutCall child), so budget ~2x this per -j slot.  A child over the cap dies and that computation counts as failed; a batch process over it ends, and run_fill_genus.sh reports its unfinished genera.  Without a cap, rank-17 genera on the C=32768 census ran Magma processes up to 220 GB.")
 parser.add_argument("--fill-stats", action="store_true", help="Have FillGenus write one fill_stats/<rank>/<nplus>/<label> record per genus (fields in fill_stats.format): the outcome -- ok, or which guard decided it (mass_skip, enum_fail, size_skip, time_discard) -- the class number, per-phase wall-clock and the slowest single lattice.  Off by default (it is another file per genus); calibrate_fill.py turns it on.")
 parser.add_argument("--skip-list-genera", action="store_true", help="Assume that genera have already been listed")
 parser.add_argument("--skip-enumerate-genera", action="store_true", help="Skip the fill stage (genus enumeration).  This does NOT imply --skip-list-genera: listing still runs unless that is also given, which is how the census listing was run (listing only, with --skip-embeddings).")
@@ -457,6 +458,7 @@ def main():
                           f"useorth:={0 if args.no_orth else 1}",
                           f"warmlimit:={args.warm_limit}",
                           f"stats:={1 if args.fill_stats else 0}",
+                          f"memlimit:={args.memlimit}",
                           "labels:={1}"],
                          # The wrapper adds done:=1 and checks that every label in the
                          # batch printed DONE or ERROR, so a Magma segfault (which can
@@ -587,10 +589,10 @@ def main():
         # are flat and fully parallel; the only barrier is between them.
         with timed("Connecting genera (pass 1: produce)"):
             parallel("genus_jobs.txt", "connect1.joblog",
-                     ["labels:={1}", "phase:=1", "run_connect_genus.m"])
+                     ["labels:={1}", "phase:=1", f"memlimit:={args.memlimit}", "run_connect_genus.m"])
         with timed("Connecting genera (pass 2: consume)"):
             parallel("genus_jobs.txt", "connect2.joblog",
-                     ["labels:={1}", "phase:=2", "run_connect_genus.m"])
+                     ["labels:={1}", "phase:=2", f"memlimit:={args.memlimit}", "run_connect_genus.m"])
 
 
 if __name__ == "__main__":
