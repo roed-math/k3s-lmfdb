@@ -208,6 +208,72 @@ observation: its time is a lower bound).  Sampled genera start with a cold orth
 cache (their rank+1 parents are not filled first, as they are in production),
 so enumeration times are upper bounds.
 
+## Benchmarking Magma against Oscar
+
+[`benchmark/`](benchmark) times Magma and Oscar on the quantities the pipeline
+stores that both can compute, and checks that they agree:
+
+| task | Magma (default = pipeline code path) | Oscar |
+| --- | --- | --- |
+| `class_number` | `GenusReps` (stock: `GenusRepresentatives`) | `genus_representatives` (also `enumerate_definite_genus` `:orbit`/`:random`) |
+| `mass` | `Mass` | `mass` |
+| `aut_order` | `AutomorphismGroupFaster` (stock: `AutomorphismGroup`) | `isometry_group` (also `automorphism_group_order`) |
+| `aut_label` | `IdentifyGroup` | `small_group_identification` |
+| `minimum`, `kissing`, `successive_minima` | `Minimum`, `KissingNumber`, `SuccessiveMinima` | `minimum`, `kissing_number`, `successive_minima` |
+| `root_system` | `RootString` | `root_lattice_recognition` |
+| `theta` | `ThetaSeries` | counted from `short_vectors_iterator` (Oscar has no theta series) |
+| `orth_decomp` | `OrthogonalDecompositionFaster` (stock: `OrthogonalDecomposition`) | `irreducible_components` |
+| `isometric_same`, `isometric_other` | `IsIsometric`, `IsIsometricBinary` | `is_isometric` |
+| `disc_image` | image of O(L) in Aut(L#/L), as fill's `aut_data` | `image_in_Oq` |
+
+Only Magma has canonical forms, Hecke (adjacency) matrices, the hashes,
+universality, Voronoi cells and t-designs, so those are not compared.  Most tasks
+need a definite lattice in both systems; for indefinite lattices the comparison is
+`class_number`, the isometry tests (Magma: rank 2 only) and `disc_image` (Oscar
+only).  [`oscar/invariants.jl`](oscar/invariants.jl) has the Oscar computations
+in the pipeline's value formats (root system strings, theta series), for reuse.
+
+```sh
+cd lattices
+# 1. a stratified sample: N genera per (rank, definite/indefinite, floor(log2 det))
+python3 benchmark/bench.py sample --data-root /path/to/census --ranks 2-16 \
+    --per-stratum 3 -o bench_cases.tsv
+# 2. every task on every case, -j servers per system, Magma and Oscar side by side
+python3 benchmark/bench.py run bench_cases.tsv -o bench_results -j 8 --timeout 600
+# 3. per task and rank: success counts, median times, Oscar/Magma time ratio, and
+#    every value on which the two disagree
+python3 benchmark/bench.py report bench_results     # -> bench_results/report.md
+```
+
+Point `--data-root` at a tree with fill output (`lattice_basic_data/`,
+`genera_advanced/`) when there is one: the sample then uses the stored class .1 and
+.2 (a non-isometric pair for `isometric_other`) and the report checks class numbers
+against the census.  `run` appends to `bench_results/results.tsv` as jobs finish,
+so rerunning it resumes; `--variants all` adds the alternative implementations,
+`--tasks` picks some.  Within each (system, task, rank, definite/indefinite) group
+the cases run by increasing determinant, and after `--max-timeouts` (default 2) the
+rest of the group is recorded as `skipped`.
+
+How it measures (details in the headers of
+[`bench_magma.m`](benchmark/bench_magma.m) and
+[`bench_oscar.jl`](benchmark/bench_oscar.jl)): each system runs as a long-lived
+single-threaded server that `bench.py` feeds jobs over a pipe, warmed up first,
+so start-up and Julia compilation are not timed (`report.md` lists them; Oscar's
+warm-up took about 3 minutes on mimir).  Fast calls are timed in blocks of up to
+10000 (1000 at rank 2), since Magma's clock has a 10 ms resolution, and every
+call gets its own Gram matrix U G U^t: while a lattice is
+referenced, Magma's `LatticeWithGram` returns that same object for an equal Gram
+matrix, so repeated calls would reuse its cached minimum and short vectors.  Magma
+bounds each job with a HardKill `TimeoutCall` (`--memlimit` via `SetMemoryLimit`);
+Julia cannot interrupt a computation, so `bench.py` kills and restarts the Oscar
+server on a timeout or past the memory limit (each restart costs that start-up
+again).  The Oscar server runs `GC.gc()` before each timed block, so a block does
+not pay for garbage left by earlier jobs.
+Measured this way, the pipeline's `class_number` includes `GenusReps`' own
+`TimeoutCall` fork (several ms), which dominates for small genera; the `stock`
+variant shows Magma without it.  The Magma server runs in an empty directory, so
+the orbit method starts with a cold `orth_cache/`, as in `calibrate_fill.py`.
+
 ## Universality and regularity columns
 
 [`universality.m`](universality.m) computes `is_universal`,

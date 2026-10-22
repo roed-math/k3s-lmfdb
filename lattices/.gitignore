@@ -39,3 +39,7 @@ fill_stats
 fill_missing_*.txt
 calibration_sample.txt
 calibration_population.tsv
+
+# benchmark/bench.py output
+bench_results*
+bench_cases*.tsv
