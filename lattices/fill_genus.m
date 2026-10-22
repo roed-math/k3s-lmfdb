@@ -339,6 +339,7 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
         genus_mass := StringToInteger(mass_pieces[1]) / StringToInteger(mass_pieces[2]);
     end if;
     skip_massive := (masslimit gt 0) and (n eq s) and (genus_mass gt masslimit);
+    spinor := 0;   // the spinor generators, for indefinite rank >= 3 (see GenusReps)
     if skip_massive then
         vprintf FillGenus, 1 : "Skipping enumeration: mass exceeds masslimit %o\n", masslimit;
         genus_success := false;
@@ -347,13 +348,17 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
         // (genus_reps.m); use_orth toggles the orbit method for definite rank >= 3,
         // refined by the rank/mass heuristic (the neighbour walk stays the default
         // for small class numbers at low rank, where it wins).
-        genus_success, reps, orth_prov := GenusReps(L0 : Timeout := timeout,
+        genus_success, reps, orth_prov, spinor := GenusReps(L0 : Timeout := timeout,
             UseOrth := use_orth and (force_orth or UseOrthHeuristic(n, genus_mass)));
     end if;
     t_enum := Realtime(genus_t0);
     enum_method := skip_massive select "none" else ((n eq s and use_orth and n ge 3 and (force_orth or UseOrthHeuristic(n, genus_mass))) select "orth" else "default");
     adj_status := "none";
     advanced["class_number"] := "\\N";
+    // Indefinite rank >= 3: the classes are labelled by their spinor coordinates
+    // relative to the published rep (genus_reps_Spinor), recorded per lattice in
+    // spinor_coordinates; this records the primes they refer to.
+    advanced["spinor_generators"] := (spinor cmpne 0) select to_postgres(spinor) else "\\N";
     advanced["adjacency_matrix"] := "\\N";
     advanced["adjacency_polynomials"] := "\\N";
     // ambient_genus: the genus of the parent lattices from which this genus's
@@ -503,6 +508,8 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
         lat["dual_theta_prec"] := "\\N";
         lat["successive_minima"] := "\\N";
         lat["root_sublattice"] := "\\N";
+        // reps are in label order for these genera, so position Li is label .Li
+        lat["spinor_coordinates"] := (spinor cmpne 0) select SpinorCoordinates(Li, #spinor) else "\\N";
         // Only set below in the positive-definite (n eq s) branch; default them here
         // so the indefinite case still has every column.
         lat["center_density"] := "\\N";

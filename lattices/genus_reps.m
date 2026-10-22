@@ -155,15 +155,44 @@ function genus_reps_Faster(L)
 end function;
 
 function genus_reps_Spinor(L)
-    // Indefinite lattices of rank >= 3: by Eichler each (proper) spinor genus consists
+    // Indefinite lattices of rank >= 3: by Eichler each improper spinor genus consists
     // of a single isometry class -- but a genus may contain SEVERAL spinor genera, so
     // all of them must be enumerated.  SpinorRepresentatives(L) alone returns only the
     // class of L's own spinor genus and under-enumerates, e.g. diag(1,20,-25), whose
     // genus has two spinor genera hence two classes.  This route also avoids Magma's
     // GenusRepresentatives, which fails on some indefinite genera (e.g. signature (2,2)
     // rank 4 -- "Illegal null sequence" / "cs must be non-empty" in its LatNF code).
-    return [Representative(S) : S in SpinorGenera(Genus(L))];
+    //
+    // The classes form a torsor under an elementary abelian 2-group, so there is no
+    // intrinsic first class; they are labelled from L, which FillGenus passes as the
+    // genus's published rep.  The spinor generators q_1 < ... < q_k are
+    // SpinorGenerators(G : Proper := false): the smallest primes not dividing 2*det,
+    // each kept if it is independent of those before it, which depends only on the
+    // genus.  The class with spinor coordinates e in {0,1}^k is reached from L by a
+    // q_i-neighbour step for each e_i = 1 (any q-neighbour: they all lie in the same
+    // spinor genus), and is returned at position 1 + sum e_i 2^(i-1), which becomes its
+    // label.  Magma's SpinorGenera builds the same lattices in the same order, but the
+    // order is computed here so that the labels do not depend on its implementation.
+    // Returns the representatives and the generators.
+    G := Genus(L);
+    gens := SpinorGenerators(G : Proper := false);
+    reps := [L];
+    for idx in [1 .. 2^#gens - 1] do
+        j := Ilog2(idx) + 1;                              // the highest coordinate set
+        N := CoordinateLattice(Neighbors(reps[idx - 2^(j-1) + 1], gens[j])[1]);
+        assert Genus(N) eq G;
+        Append(~reps, N);
+    end for;
+    return reps, gens;
 end function;
+
+intrinsic SpinorCoordinates(idx::RngIntElt, k::RngIntElt) -> SeqEnum
+{The spinor coordinates of the class at position idx (counting from 1) of an
+indefinite genus of rank >= 3 with k spinor generators: the 0/1 vector e of length k
+with idx - 1 = sum e_i 2^(i-1).}
+    require idx ge 1 and idx le 2^k : "position out of range";
+    return [ ((idx - 1) div 2^(i-1)) mod 2 : i in [1..k] ];
+end intrinsic;
 
 forward genus_reps_orth;
 
@@ -1031,11 +1060,13 @@ satisfy mass >= 5; be wary of reading the threshold as "class number >= 5".}
     return false;
 end intrinsic;
 
-intrinsic GenusReps(L0::Lat : Timeout := 1800, UseOrth := true) -> BoolElt, SeqEnum, Any
+intrinsic GenusReps(L0::Lat : Timeout := 1800, UseOrth := true) -> BoolElt, SeqEnum, Any, Any
 {Enumerate the genus of L0 with the method dispatch used by the LMFDB lattice
 pipeline, under a wall-clock timeout (in seconds).  Returns success, the list of
-representatives (empty on failure), and -- for the orbit method -- the provenance
-<ambient genus label, [<ambient counter, vector>]> (0 when unavailable).
+representatives (empty on failure), -- for the orbit method -- the provenance
+<ambient genus label, [<ambient counter, vector>]> (0 when unavailable), and -- for
+indefinite rank >= 3 -- the spinor generators, in which case the representatives are
+in label order from L0 (see genus_reps_Spinor; 0 otherwise).
 
 Rank-2 lattices of square determinant are handled directly (Magma's
 GenusRepresentatives rejects square discriminants); positive definite lattices of
@@ -1055,6 +1086,7 @@ fill batches that still reported failed=0.  Do not drop it in a refactor.}
     posdef := IsPositiveDefinite(Gm);
     negdef := (not posdef) and IsPositiveDefinite(-Gm);
     prov := 0;
+    spinor := 0;
     // Rank-2 lattices of square determinant -m^2 have isotropic (split) forms, on
     // which Magma's GenusRepresentatives fails (it reduces to binary quadratic
     // forms, which reject square discriminants); these are handled directly.  Note
@@ -1087,7 +1119,8 @@ fill batches that still reported failed=0.  Do not drop it in a refactor.}
     elif (n ge 3) then
         // Genuinely indefinite rank >= 3: one representative per spinor genus of the
         // genus; each spinor genus is a single isometry class by Eichler.
-        genus_success, reps, elapsed := TimeoutCall(Timeout, genus_reps_Spinor, <L0>, 1 : HardKill := true);
+        genus_success, reps, elapsed := TimeoutCall(Timeout, genus_reps_Spinor, <L0>, 2 : HardKill := true);
+        if genus_success then spinor := reps[2]; end if;
         vprintf GenusReps, 1 : "Genus representatives (spinor genera) computed in %o seconds\n", elapsed;
     else
         // Rank 1-2: neither the definite rank >= 3 methods nor the spinor route
@@ -1099,7 +1132,7 @@ fill batches that still reported failed=0.  Do not drop it in a refactor.}
         if posdef and (n ge 3) and UseOrth then
             prov := reps[2];
         end if;
-        return true, reps[1], prov;
+        return true, reps[1], prov, spinor;
     end if;
-    return false, [], 0;
+    return false, [], 0, 0;
 end intrinsic;
