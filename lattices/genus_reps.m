@@ -99,7 +99,7 @@ function genus_reps_Magma(L)
       // Unpatched Magma (2.30-1 and presumably earlier) gets indefinite binary
       // genera wrong: its BinaryGenusRepresentatives can return lattices outside the
       // genus, miss classes, and return a class together with its mirror image.  The
-      // fix is magma_patches/BinaryGenusSpinor-2.30-1.patch, and run_all.py refuses
+      // fix is magma_patches/neighbors-2.30-1.patch, and run_all.py refuses
       // to fill without it (MagmaBinaryGenusPatched below).  Keeping one
       // representative per isometry class is then a no-op, kept as a guard.
       // (Square discriminants never get here -- genus_reps_square_disc -- and the
@@ -125,7 +125,7 @@ end function;
 
 intrinsic MagmaBinaryGenusPatched() -> BoolElt, MonStgElt
 {Whether this Magma's GenusRepresentatives is right on indefinite binary lattices,
-i.e. carries magma_patches/BinaryGenusSpinor-2.30-1.patch, and if not, a description
+i.e. carries magma_patches/neighbors-2.30-1.patch, and if not, a description
 of the first failure.  Each case fails on unpatched 2.30-1: x^2 - 34y^2 with Proper
 on every seed tried, x^2 - 79y^2 in about 49 calls in 50.}
     lat := func<g | LatticeWithGram(Matrix(Integers(), 2, 2, g) : CheckPositive := false)>;
@@ -154,6 +154,39 @@ function genus_reps_Faster(L)
     return reps;
 end function;
 
+// The spinor generators of an indefinite genus of rank >= 3: Magma's
+// SpinorGenerators(G : Proper := false) restricted to odd primes.  Taking primes in
+// increasing order, keep p if it does not divide det and its spinor character values
+// are independent of those of the primes already kept.  Magma's version also tries
+// 2 when det and the characters' modulus are odd, but a 2-neighbour step needs a
+// vector outside 2L of norm divisible by 4, which an odd lattice may not have
+// (diag(1,1,1)): Neighbors(L, 2) is then empty and Magma's SpinorGenera fails, e.g.
+// on 3.2.3375.11.11.2a7.  Odd primes not dividing det always give neighbours in
+// rank >= 3, and by Dirichlet's theorem they realise every character vector.
+function spinor_generators(G)
+    xgens := SpinorCharacters(G : Proper := false);
+    X := Universe(xgens);
+    if #xgens eq 1 and xgens[1] eq X!1 then
+        return [ Integers() | ];
+    end if;
+    d := Determinant(G);
+    V := VectorSpace(GF(2), #xgens);
+    U := sub< V | V!0 >;
+    gens := [ Integers() | ];
+    p := 3;
+    while U ne V do
+        if d mod p ne 0 then
+            w := V![ (1 - Evaluate(x, p)) div 2 : x in xgens ];
+            if w notin U then
+                U := sub< V | Basis(U) cat [ w ] >;
+                Append(~gens, p);
+            end if;
+        end if;
+        p := NextPrime(p);
+    end while;
+    return gens;
+end function;
+
 function genus_reps_Spinor(L)
     // Indefinite lattices of rank >= 3: by Eichler each improper spinor genus consists
     // of a single isometry class -- but a genus may contain SEVERAL spinor genera, so
@@ -165,24 +198,31 @@ function genus_reps_Spinor(L)
     //
     // The classes form a torsor under an elementary abelian 2-group, so there is no
     // intrinsic first class; they are labelled from L, which FillGenus passes as the
-    // genus's published rep.  The spinor generators q_1 < ... < q_k are
-    // SpinorGenerators(G : Proper := false): the smallest primes not dividing 2*det,
-    // each kept if it is independent of those before it, which depends only on the
-    // genus.  The class with spinor coordinates e in {0,1}^k is reached from L by a
+    // genus's published rep.  The spinor generators q_1 < ... < q_k
+    // (spinor_generators above) are the smallest primes not dividing 2*det, each
+    // kept if it is independent of those before it, which depends only on the genus.  The class with spinor coordinates e in {0,1}^k is reached from L by a
     // q_i-neighbour step for each e_i = 1 (any q-neighbour: they all lie in the same
     // spinor genus), and is returned at position 1 + sum e_i 2^(i-1), which becomes its
-    // label.  Magma's SpinorGenera builds the same lattices in the same order, but the
-    // order is computed here so that the labels do not depend on its implementation.
+    // label.  Magma's SpinorGenera builds the same classes in the same order, except
+    // where its generators start with 2 (and it fails), but the order is computed
+    // here so that the labels do not depend on its implementation.
+    // The lattices themselves can vary from run to run: which neighbour Neighbors
+    // returns first depends on the process's state.
     // Returns the representatives and the generators.
     G := Genus(L);
-    gens := SpinorGenerators(G : Proper := false);
-    reps := [L];
+    gens := spinor_generators(G);
+    // Magma's Neighbours divides out the content with LatticeWithGram, which rejects
+    // an indefinite form ("not positive definite"; Magma 2.30-1), so every genus with
+    // content > 1 and several classes failed to enumerate.  Take neighbours of the
+    // primitive lattice and scale back.
+    c := Content(L);
+    P := [ LatticeWithGram(ChangeRing(GramMatrix(L), Rationals()) / c : CheckPositive := false) ];
     for idx in [1 .. 2^#gens - 1] do
         j := Ilog2(idx) + 1;                              // the highest coordinate set
-        N := CoordinateLattice(Neighbors(reps[idx - 2^(j-1) + 1], gens[j])[1]);
-        assert Genus(N) eq G;
-        Append(~reps, N);
+        Append(~P, CoordinateLattice(Neighbors(P[idx - 2^(j-1) + 1], gens[j])[1]));
     end for;
+    reps := [L] cat [ LatticeWithGram(ChangeRing(c * GramMatrix(N), Integers()) : CheckPositive := false) : N in P[2..#P] ];
+    assert forall{N : N in reps | Genus(N) eq G};
     return reps, gens;
 end function;
 

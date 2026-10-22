@@ -41,7 +41,11 @@ pipe-separated columns of the corresponding records.
    [`run_connect_genus.m`](run_connect_genus.m), two passes): everything that
    needs data across genera — duals, orthogonal decompositions, geometric
    invariants, names, and the universality/regularity columns (see below).
-   Writes `lattice_advanced_data/`.
+   Writes `lattice_advanced_data/`.  Labels in indefinite genera of rank >= 3
+   with several classes need an isometry test Magma lacks; connect records those
+   lookups in `indefinite_lookups/`, and
+   [`oscar/resolve_indefinite.jl`](oscar/resolve_indefinite.jl) fills them in
+   with Oscar afterwards.
 6. **Embeddings** (Julia/Oscar, [`oscar/driver.jl`](oscar/driver.jl) under GNU
    parallel; design in [`oscar/INTEGRATION_PLAN.md`](oscar/INTEGRATION_PLAN.md)):
    prime-index overlattices, corank-1 primitive embeddings (rank n → n+1) and
@@ -112,7 +116,7 @@ location is not on `PATH`, so run the pipeline with
 Magma must also carry the patch in [`magma_patches/`](magma_patches): without it
 `GenusRepresentatives` returns wrong classes for indefinite binary lattices
 (lattices from another genus, missing classes).  Apply it from Magma's root
-directory with `patch -p0 < .../magma_patches/BinaryGenusSpinor-2.30-1.patch`;
+directory with `patch -p0 < .../magma_patches/neighbors-2.30-1.patch`;
 `magma -b check_magma.m` (from `lattices/`) prints `MAGMA_OK` once it is in, and
 `run_all.py` runs that check before the fill stage.
 

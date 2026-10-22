@@ -380,7 +380,7 @@ def clean_outputs():
     targets = ["genera_advanced", "genera_hash", "lattice_basic_data",
                "lattice_advanced_data", "lattice_hashes", "voronoi", "shortest",
                "orth_cache", "fill_stats",   # stale cached genera would leak old counters/labels into provenance
-               "inclusions", "embed_labels", "refine_sidecar"]
+               "inclusions", "embed_labels", "refine_sidecar", "indefinite_lookups"]
     if not args.skip_list_genera:
         targets.append("genera_basic")   # regenerated below; otherwise it is this run's input
     removed = []
@@ -600,6 +600,21 @@ def main():
         with timed("Connecting genera (pass 2: consume)"):
             parallel("genus_jobs.txt", "connect2.joblog",
                      ["labels:={1}", "phase:=2", f"memlimit:={args.memlimit}", "run_connect_genus.m"])
+        # Labels in indefinite genera of rank >= 3 with several classes, which only
+        # Oscar can decide: connect records those lookups in indefinite_lookups/
+        # (FindLabel), and resolve_indefinite.jl fills in the columns.
+        lookups = Path("indefinite_lookups")
+        if lookups.is_dir() and any(f.is_file() for f in lookups.rglob("*")):
+            with timed("Resolving indefinite lookups (Oscar)"):
+                try:
+                    r = subprocess.run(["julia", "--project=oscar", "oscar/resolve_indefinite.jl", "."],
+                                       env=julia_env())
+                    ok = r.returncode == 0
+                except FileNotFoundError:
+                    ok = False
+                if not ok:
+                    print("WARNING: oscar/resolve_indefinite.jl failed; the columns it would fill "
+                          "stay null (rerun it from lattices/ once Oscar works)", flush=True)
 
 
 if __name__ == "__main__":

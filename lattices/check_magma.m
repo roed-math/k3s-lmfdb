@@ -8,7 +8,7 @@ a, b, c := GetVersion();
 version := Sprintf("%o.%o-%o", a, b, c);
 ok, msg := MagmaBinaryGenusPatched();
 if not ok then
-    printf "ERROR: this Magma (%o) is not patched: %o\nApply magma_patches/BinaryGenusSpinor-2.30-1.patch to its package directory.\n", version, msg;
+    printf "ERROR: this Magma (%o) is not patched: %o\nApply magma_patches/neighbors-2.30-1.patch to its package directory.\n", version, msg;
     exit 1;
 end if;
 printf "MAGMA_OK: Magma %o gets indefinite binary genera right\n", version;

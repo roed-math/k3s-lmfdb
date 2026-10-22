@@ -102,3 +102,34 @@
     end if;
     // !! TODO - map back to the underlying quadratic space when Natural
     return [ LatticeWithGram(c * s : CheckPositive := false) : s in S ];
+@@ -738,10 +793,10 @@
+    end if;
+    c := Content(L);
+    if c ne 1 then
+-      L := LatticeWithGram((1/c)*GramMatrix(L));
++      L := LatticeWithGram((1/c)*GramMatrix(L) : CheckPositive := false);
+    end if;
+    if IsOdd(L) then
+-      L := LatticeWithGram(2*GramMatrix(L));
++      L := LatticeWithGram(2*GramMatrix(L) : CheckPositive := false);
+       c := c/2;
+    end if;
+    D := -Determinant(L); 
+@@ -755,7 +810,7 @@
+    S := { C | f*g, f*g^-1 };
+    return [ N : N in { LatticeWithGram( 
+       c * MatrixAlgebra(Integers(),2) !
+-         [ 2*f[1], Abs(f[2]), Abs(f[2]), 2*f[3] ]) :
++         [ 2*f[1], Abs(f[2]), Abs(f[2]), 2*f[3] ] : CheckPositive := false) :
+             f in S } ];
+ end function;
+ 
+@@ -798,7 +853,7 @@
+ 
+    c := Content(L);
+    if c ne 1 then
+-      L := LatticeWithGram((1/c)*GramMatrix(L));
++      L := LatticeWithGram((1/c)*GramMatrix(L) : CheckPositive := false);
+    end if;
+    require Type(Depth) eq RngIntElt and Depth ge -1:
+       "Parameter 'Depth' should be a non-negative integer.";

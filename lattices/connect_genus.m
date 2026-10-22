@@ -122,12 +122,15 @@ function first_isometric(L, grams, n)
     return 0;
 end function;
 
-intrinsic FindLabel(L::Lat : genus_data:=<>, Timeout := 0) -> MonStgElt
+intrinsic FindLabel(L::Lat : genus_data:=<>, Timeout := 0) -> MonStgElt, MonStgElt
 {Given a lattice, find its label (or null if not in database).  With Timeout > 0 the
 two steps that can run unbounded -- hashing L and the isometry tests against the
 classes sharing its hash -- each run in a HardKill TimeoutCall of that many seconds,
 and an overrun returns null; the lookups themselves stay in this process, where the
-hash cache lives.}
+hash cache lives.  The second value is the label of L's genus when L lies in an
+indefinite genus of rank >= 3 with several stored classes, which Magma cannot
+decide between (null is returned; see ConnectGenus and oscar/resolve_indefinite.jl),
+and the empty string otherwise.}
     if #genus_data eq 0 then
         genus_data := FindGenusData(L);
     end if;
@@ -143,28 +146,32 @@ hash cache lives.}
         // genus are all of its classes or none, so a genus with a single stored row
         // has class number 1 and that row is L's class.  Rank 2 has an exact
         // isometry test (IsIsometricBinary).  For rank >= 3 the classes are the
-        // (improper) spinor genera, and Magma has no cheap way to place a given
-        // lattice in one (its spinor-genus eq falls back to isometry tests), so
-        // those stay "\N".
+        // (improper) spinor genera, and Magma has no way to place a given lattice in
+        // one (its spinor-genus eq falls back to isometry tests, which need a definite
+        // form), so the genus is returned for Oscar to decide.
         rows := load_hash_rows(genus_hash, Rank(L), nplus);
         if #rows eq 1 then
-            return rows[1][label_pos];
+            return rows[1][label_pos], "";
         end if;
         if #rows gt 1 and Rank(L) eq 2 and Determinant(L) lt 0 then
             gram_pos := Index(hash_format, "gram");
             for row in rows do
                 if IsIsometricBinary(L, GramStringToLat(row[gram_pos], 2)) then
-                    return row[label_pos];
+                    return row[label_pos], "";
                 end if;
             end for;
         end if;
-        return "\\N";
+        if #rows gt 1 and Rank(L) ge 3 then
+            pieces := Split(rows[1][label_pos], ".");
+            return "\\N", Join(pieces[1..#pieces-1], ".");
+        end if;
+        return "\\N", "";
     elif #by_hash eq 1 then
         poss := Values(by_hash)[1];
     else
         if Timeout gt 0 then
             ok, hv := TimeoutCall(Timeout, HashLat, <L, genus_hash, hash_func>, 1 : HardKill := true);
-            if not ok then return "\\N"; end if;
+            if not ok then return "\\N", ""; end if;
             h := hv[1];
         else
             h := HashLat(L, genus_hash, hash_func);
@@ -179,7 +186,7 @@ hash cache lives.}
         grams := [lat[gram_pos] : lat in poss];
         if Timeout gt 0 then
             ok, iv := TimeoutCall(Timeout, first_isometric, <L, grams, n>, 1 : HardKill := true);
-            if not ok then return "\\N"; end if;
+            if not ok then return "\\N", ""; end if;
             i := iv[1];
         else
             i := first_isometric(L, grams, n);
@@ -187,7 +194,7 @@ hash cache lives.}
         assert i ne 0;
         found := poss[i];
     end if;
-    return found[label_pos];
+    return found[label_pos], "";
 end intrinsic;
 
 intrinsic LatSortKey(label::MonStgElt) -> Tup
@@ -890,8 +897,13 @@ two-pass connect in run_all.py).}
             _ := LLL(L);
             _ := LLL(D);
         end if;
+        // Lookups that land in an indefinite genus of rank >= 3 with several classes,
+        // which Magma cannot tell apart: <column, genus label, lattice>, left for
+        // oscar/resolve_indefinite.jl (see the end of this loop).
+        deferred := [* *];
         lat["dual_det"] := Determinant(D);
-        lat["dual_label"] := FindLabel(D : Timeout := timeout);
+        lat["dual_label"], dgenus := FindLabel(D : Timeout := timeout);
+        if dgenus ne "" then Append(~deferred, <"dual_label", dgenus, D>); end if;
         if definite then
             ok, dg := TimeoutCall(timeout, dual_geometry, <D>, 3 : HardKill := true);
             if ok then
@@ -1045,7 +1057,9 @@ two-pass connect in run_all.py).}
         if scale eq 1 then
             lat["primitive_scaling"] := "\\N";
         else
-            lat["primitive_scaling"] := FindLabel(LatticeWithGram(GramMatrix(L) div scale : CheckPositive := false) : Timeout := timeout);
+            P := LatticeWithGram(GramMatrix(L) div scale : CheckPositive := false);
+            lat["primitive_scaling"], dgenus := FindLabel(P : Timeout := timeout);
+            if dgenus ne "" then Append(~deferred, <"primitive_scaling", dgenus, P>); end if;
         end if;
 
         if definite then
@@ -1167,7 +1181,9 @@ two-pass connect in run_all.py).}
         if lat["is_even"] eq "T" then
             lat["even_sublattice"] := "\\N";
         else
-            lat["even_sublattice"] := FindLabel(EvenSublattice(L) : Timeout := timeout);
+            E := EvenSublattice(L);
+            lat["even_sublattice"], dgenus := FindLabel(E : Timeout := timeout);
+            if dgenus ne "" then Append(~deferred, <"even_sublattice", dgenus, E>); end if;
         end if;
 
         // root_sublattice itself is a sort key of the genus, so FillGenus computes it
@@ -1216,6 +1232,18 @@ two-pass connect in run_all.py).}
 
         */
 
+
+        // Write the deferred lookups for oscar/resolve_indefinite.jl, which tests the
+        // lattice against each class of the genus with Oscar's is_isometric and
+        // patches the column in this lattice's advanced record.
+        sidecar := LabelPath("indefinite_lookups", lat["label"]);
+        if #deferred gt 0 then
+            Write(LabelPath("indefinite_lookups", lat["label"] : Create),
+                  Join([Sprintf("%o|%o|%o", d[1], d[2], to_postgres(Eltseq(ChangeRing(GramMatrix(d[3]), Integers()))))
+                        : d in deferred], "\n") : Overwrite);
+        elif OpenTest(sidecar, "r") then
+            System("rm -f " * sidecar);   // left by an earlier connect run
+        end if;
 
         // lat carries input fields not in lat_advanced.format (the hash record's
         // gram/hash/minimum and the basic fields merged in above); drop them so

@@ -30,12 +30,19 @@ for c in cases do
     AssertEqual(~results, #reps, 2^#gens, c[1] * ": one class per spinor coordinate vector");
     AssertTrue(~results, GramMatrix(reps[1]) eq GramMatrix(L0), c[1] * ": class .1 is the rep itself");
     AssertTrue(~results, forall{R : R in reps | Genus(R) eq Genus(L0)}, c[1] * ": every class lies in the genus");
-    // The same lattices, in the same order, as Magma's SpinorGenera (which builds
-    // them the same way) -- the labels must not depend on that, but it checks the
-    // construction.
-    magma := [GramMatrix(Representative(S)) : S in SpinorGenera(Genus(L0))];
-    AssertTrue(~results, [GramMatrix(R) : R in reps] eq magma, c[1] * ": agrees with SpinorGenera");
+    // Magma's SpinorGenera builds the same classes in the same order, but which
+    // neighbour Neighbors returns first can depend on the process's state, so the
+    // lattices themselves can differ; oscar/test_spinor_labels.jl compares the
+    // classes with an isometry test.
+    AssertEqual(~results, #reps, #SpinorGenera(Genus(L0)), c[1] * ": as many classes as SpinorGenera");
 end for;
+
+// Content 2 (3.2.2000.21.11.26, the even sublattice of diag(1,20,-25)): Magma's
+// Neighbours, and so its SpinorGenera, fail on it ("not positive definite").
+L0 := LatticeWithGram(Matrix(Rationals(), 3, 3, [4, 2, 0, 2, -4, 0, 0, 0, 100]) : CheckPositive := false);
+ok, reps, prov, gens := GenusReps(L0 : Timeout := 300);
+AssertTrue(~results, ok and gens eq [3] and #reps eq 2 and GramMatrix(reps[1]) eq GramMatrix(L0)
+    and forall{R : R in reps | Genus(R) eq Genus(L0)}, "content 2: two classes in the genus, the first the rep");
 
 // An indefinite genus with one class has no generators: label .1 = the rep.
 L0 := LatticeWithGram(DiagonalMatrix(Rationals(), [1, 1, -1]) : CheckPositive := false);

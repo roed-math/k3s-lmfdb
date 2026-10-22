@@ -1,0 +1,27 @@
+--- package/Lattice/Lat/diagonal.m
++++ package/Lattice/Lat/diagonal.m
+@@ -232,6 +232,24 @@
+       end if; 
+    end for;
+ 
++   // For an indefinite form the real place has every spinor norm, so the idele
++   // that is -1 at infinity is automorphous; in these coordinates it is the vector
++   // of character values at -1.  Without it an indefinite genus was treated as
++   // definite at infinity and its number of spinor genera came out twice as large
++   // whenever the -1 character survived.
++   G := GramMatrix(L);
++   if not IsPositiveDefinite(G) and not IsPositiveDefinite(-G) then
++      g := [ q eq -1 select -1 else KroneckerSymbol(-1, q) : q in chars ];
++      I := [ k : k in [1..#chars] | g[k] eq -1 ];
++      if #I eq 1 then
++         k := I[1];
++         Remove(~chars,k);
++         gens := { Remove(h,k) : h in gens };
++      elif #I ge 2 then
++         Include(~gens,g);
++      end if;
++   end if;
++
+    // Any reflection acts on the proper spinor genera.
+    // The orbits are the full spinor genera.
+    // We simply compute such a reflection v of norm coprime to 2*det(L).

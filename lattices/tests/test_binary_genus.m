@@ -10,7 +10,7 @@ load "tests/assertions.m";
 results := NewResults();
 
 ok, msg := MagmaBinaryGenusPatched();
-AssertTrue(~results, ok, "Magma carries magma_patches/BinaryGenusSpinor-2.30-1.patch: " * msg);
+AssertTrue(~results, ok, "Magma carries magma_patches/neighbors-2.30-1.patch: " * msg);
 
 Lat := func<g | LatticeWithGram(Matrix(Integers(), 2, 2, g) : CheckPositive := false)>;
 
