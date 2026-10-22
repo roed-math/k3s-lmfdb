@@ -667,6 +667,19 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
     if (n eq s) then
         Sort(~lats, cmp_lat, ~perm);
     end if;
+    // Store the Hecke matrices in label order: row and column i belong to the lattice
+    // labelled .i, which is the enumerated class i^perm (Sort gives new lats[i] =
+    // old lats[i^perm]).  The enumeration order is random from run to run, so a
+    // matrix left in it cannot be matched to the labels.  When no lattices are stored
+    // (sizelimit, timelimit) there are no labels, and it stays in enumeration order.
+    if have_adjacency and #lats gt 0 then
+        for p in Keys(hecke_mats) do
+            A := hecke_mats[p];
+            N := Nrows(A);
+            hecke_mats[p] := Matrix(Integers(), N, N, &cat[[A[i^perm, j^perm] : j in [1..N]] : i in [1..N]]);
+        end for;
+        advanced["adjacency_matrix"] := to_postgres(hecke_mats);
+    end if;
 
     SetColumns(0);
     for idx->L in lats do
@@ -704,8 +717,7 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
         if have_adjacency then   // pneighbors are read off the Hecke matrix, so only when it was computed
             pNeighbors := AssociativeArray();
             for p in hecke_primes(n) do
-                // !!! TODO - check that permutation is applied in the right direction
-                pNeighbors[p] := ["\"" * lats[j]["label"] * "\"" : j in [1..#lats] | hecke_mats[p][idx^perm,j^perm] ne 0];
+                pNeighbors[p] := ["\"" * lats[j]["label"] * "\"" : j in [1..#lats] | hecke_mats[p][idx, j] ne 0];
             end for;
             lat["pneighbors"] := to_postgres(pNeighbors);
         else
