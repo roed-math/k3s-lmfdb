@@ -112,8 +112,22 @@ intrinsic FindGenusData(L::Lat) -> Tup
     return <genus_hash, hash_func>;
 end intrinsic;
 
-intrinsic FindLabel(L::Lat : genus_data:=<>) -> MonStgElt
-{Given a lattice, find its label (or null if not in database)}
+// The isometry search of FindLabel, over the candidates' stored Gram strings, so that
+// it can run in a TimeoutCall child: the index of the first candidate isometric to L,
+// or 0.
+function first_isometric(L, grams, n)
+    for i in [1..#grams] do
+        if IsIsomorphic(L, GramStringToLat(grams[i], n)) then return i; end if;
+    end for;
+    return 0;
+end function;
+
+intrinsic FindLabel(L::Lat : genus_data:=<>, Timeout := 0) -> MonStgElt
+{Given a lattice, find its label (or null if not in database).  With Timeout > 0 the
+two steps that can run unbounded -- hashing L and the isometry tests against the
+classes sharing its hash -- each run in a HardKill TimeoutCall of that many seconds,
+and an overrun returns null; the lookups themselves stay in this process, where the
+hash cache lives.}
     if #genus_data eq 0 then
         genus_data := FindGenusData(L);
     end if;
@@ -148,7 +162,13 @@ intrinsic FindLabel(L::Lat : genus_data:=<>) -> MonStgElt
     elif #by_hash eq 1 then
         poss := Values(by_hash)[1];
     else
-        h := HashLat(L, genus_hash, hash_func);
+        if Timeout gt 0 then
+            ok, hv := TimeoutCall(Timeout, HashLat, <L, genus_hash, hash_func>, 1 : HardKill := true);
+            if not ok then return "\\N"; end if;
+            h := hv[1];
+        else
+            h := HashLat(L, genus_hash, hash_func);
+        end if;
         poss := by_hash[h];
     end if;
     if #poss eq 1 then
@@ -156,15 +176,16 @@ intrinsic FindLabel(L::Lat : genus_data:=<>) -> MonStgElt
     else
         n := Rank(L);
         gram_pos := Index(hash_format, "gram");
-        found := [];
-        for lat in poss do
-            M := GramStringToLat(lat[gram_pos], n);
-            if IsIsomorphic(L, M) then
-                found := lat;
-                break;
-            end if;
-        end for;
-        assert #found ne 0;
+        grams := [lat[gram_pos] : lat in poss];
+        if Timeout gt 0 then
+            ok, iv := TimeoutCall(Timeout, first_isometric, <L, grams, n>, 1 : HardKill := true);
+            if not ok then return "\\N"; end if;
+            i := iv[1];
+        else
+            i := first_isometric(L, grams, n);
+        end if;
+        assert i ne 0;
+        found := poss[i];
     end if;
     return found[label_pos];
 end intrinsic;
@@ -631,6 +652,27 @@ default: these computations sit in C builtins the child's Alarm cannot interrupt
     end if;
 end intrinsic;
 
+// Connect's per-lattice computations that can run unbounded go through HardKill
+// children, as in fill (see the note above minimum_data in fill_genus.m): nothing can
+// interrupt the batch process itself.
+function dual_geometry(D)
+    return Density(D), HermiteNumber(D), KissingNumber(D);
+end function;
+
+// The orthogonal summands, as flattened Gram matrices (serializable across the fork,
+// and one sequence can hold summands of different ranks; FindLabel only needs each
+// summand's isometry class).  orth_dec enumerates vectors up to the largest diagonal
+// entry of an LLL-reduced Gram matrix, which at high rank can be a very large set.
+function orthogonal_summand_grams(L)
+    return [Eltseq(GramMatrix(M)) : M in OrthogonalDecompositionFaster(L)];
+end function;
+
+// Coordinates of the vectors of norm 1, and of norm 1 or 2 (up to sign).
+function low_norm_coords(L)
+    sv := ShortVectors(L, 1, 2);
+    return [Eltseq(x[1]) : x in sv | x[2] eq 1], [Eltseq(x[1]) : x in sv];
+end function;
+
 intrinsic ShortestVectorCoords(L::Lat) -> SeqEnum
 {The coordinate sequences of the shortest vectors of L (up to sign). Returns plain
  integer sequences rather than lattice vectors so the result can be serialized
@@ -710,8 +752,7 @@ end intrinsic;
 
 function SplitPipe(s)
     // Split on "|" preserving empty fields.  Magma's Split drops empty tokens, which
-    // misaligns an advanced record whose columns can be empty strings (e.g. an empty
-    // root system serialises to "").
+    // misaligns an advanced record whose columns can be empty strings.
     parts := [];
     cur := "";
     for i in [1..#s] do
@@ -773,6 +814,7 @@ fields are left "\N" for a later ConnectGenusDerive (consume) pass, so that ever
 factor's data is guaranteed on disk before it is read (the "produce" pass of the
 two-pass connect in run_all.py).}
     SetColumns(0);
+    WarmLatticeCaches();   // see fill_genus.m
     advanced_format := Split(Split(Read("lat_advanced.format"), "\n")[1], "|");
     basic_format := Split(Split(Read("lat_basic.format"), "\n")[1], "|");
     atomic_names := LoadAtomicNames();              // stage-4 atomic names (run_basic_names)
@@ -842,12 +884,19 @@ two-pass connect in run_all.py).}
             if not IsDefined(lat, col) then lat[col] := "\\N"; end if;
         end for;
 
-        lat["dual_det"] := Determinant(D);
-        lat["dual_label"] := FindLabel(D);
         if definite then
-            lat["dual_density"] := Density(D);
-            lat["dual_hermite"] := HermiteNumber(D);
-            lat["dual_kissing"] := KissingNumber(D);
+            // LLL always finishes, and caches a reduced basis that the children
+            // below inherit instead of each recomputing it (see FillGenus).
+            _ := LLL(L);
+            _ := LLL(D);
+        end if;
+        lat["dual_det"] := Determinant(D);
+        lat["dual_label"] := FindLabel(D : Timeout := timeout);
+        if definite then
+            ok, dg := TimeoutCall(timeout, dual_geometry, <D>, 3 : HardKill := true);
+            if ok then
+                lat["dual_density"], lat["dual_hermite"], lat["dual_kissing"] := Explode(dg);
+            end if;
         end if;
         // dual_theta_series / dual_theta_prec are computed and stored in FillGenus
         // (lat_basic.format), so they are not recomputed here.
@@ -996,18 +1045,25 @@ two-pass connect in run_all.py).}
         if scale eq 1 then
             lat["primitive_scaling"] := "\\N";
         else
-            lat["primitive_scaling"] := FindLabel(LatticeWithGram(GramMatrix(L) div scale : CheckPositive := false));
+            lat["primitive_scaling"] := FindLabel(LatticeWithGram(GramMatrix(L) div scale : CheckPositive := false) : Timeout := timeout);
         end if;
 
         if definite then
-        summands := OrthogonalDecompositionFaster(L);
-        lat["is_indecomposable"] := (#summands eq 1);
-        summand_labels := [FindLabel(M) : M in summands];
-        collected := CountFibers(summand_labels, func<x | LatSortKey(x)>);   // CountFibers wants a UserProgram, not an intrinsic
-        lat["orthogonal_factors"] := [fib[1][4] : fib in collected];
-        lat["orthogonal_multiplicities"] := [fib[2] : fib in collected];
-        lat["name"] := LatticeName(lat["label"], lat["orthogonal_factors"],
-                                   lat["orthogonal_multiplicities"], atomic_names, name_i);
+        ok, og := TimeoutCall(timeout, orthogonal_summand_grams, <L>, 1 : HardKill := true);
+        if ok then
+            summands := [LatticeWithGram(Matrix(Integers(), Isqrt(#g), Isqrt(#g), g)) : g in og[1]];
+            lat["is_indecomposable"] := (#summands eq 1);
+            summand_labels := [FindLabel(M : Timeout := timeout) : M in summands];
+            collected := CountFibers(summand_labels, func<x | LatSortKey(x)>);   // CountFibers wants a UserProgram, not an intrinsic
+            lat["orthogonal_factors"] := [fib[1][4] : fib in collected];
+            lat["orthogonal_multiplicities"] := [fib[2] : fib in collected];
+            lat["name"] := LatticeName(lat["label"], lat["orthogonal_factors"],
+                                       lat["orthogonal_multiplicities"], atomic_names, name_i);
+        else
+            // The decomposition timed out: is_indecomposable and the factors stay "\N",
+            // and so does everything below that depends on them.
+            lat["name"] := IsDefined(atomic_names, lat["label"]) select atomic_names[lat["label"]] else "\\N";
+        end if;
 
         for col in ["covering_norm_num", "covering_norm_den", "deep_holes", "deep_hole_count", "deep_hole_orbit_count", "hole_count"] do
             lat[col] := "\\N"; // Overwritten below if possible
@@ -1015,7 +1071,7 @@ two-pass connect in run_all.py).}
         for col in ["shortest", "is_well_rounded", "is_minimal_vector_generated", "is_strongly_well_rounded", "is_eutactic", "is_strongly_eutactic", "t_design", "perfection_defect", "is_perfect", "is_strongly_perfect"] do
             lat[col] := "\\N"; // Overwritten below if possible
         end for;
-        if lat["is_indecomposable"] then
+        if lat["is_indecomposable"] cmpeq true then
             aut_group := (lat["aut_group"] cmpne "\\N") select StringToGroup(lat["aut_group"]) else 0;
             // aut_group is the integer 0 when the automorphism group is unknown ("\N",
             // e.g. an AutomorphismGroup timeout -- more frequent at high rank).
@@ -1079,7 +1135,7 @@ two-pass connect in run_all.py).}
                 end if;
                 SaveSVdat(lat);
             end if;
-        elif derive_decomposable then
+        elif lat["is_indecomposable"] cmpeq false and derive_decomposable then
             // Consumer step: derive this decomposable lattice's fields from its
             // orthogonal factors' data.  Skipped when derive_decomposable is false
             // (the "produce" pass), which leaves those fields "\N" for a later
@@ -1111,27 +1167,28 @@ two-pass connect in run_all.py).}
         if lat["is_even"] eq "T" then
             lat["even_sublattice"] := "\\N";
         else
-            lat["even_sublattice"] := FindLabel(EvenSublattice(L));
+            lat["even_sublattice"] := FindLabel(EvenSublattice(L) : Timeout := timeout);
         end if;
 
+        // root_sublattice itself is a sort key of the genus, so FillGenus computes it
+        // (lat_basic.format); the complement needs FindLabel, so it is done here.
         if definite then
-        sv1 := ShortVectors(L, 1, 1);
-        R1 := sub<L|[x[1] : x in sv1]>;
-        lat["norm1_rank"] := Rank(R1);
-        if Rank(R1) eq 0 or Rank(R1) eq n then
-            lat["norm1_complement"] := "\\N";
-        else
-            lat["norm1_complement"] := FindLabel(OrthogonalComplementFaster(L, R1));
-        end if;
+        ok, lc := TimeoutCall(timeout, low_norm_coords, <L>, 2 : HardKill := true);
+        if ok then
+            R1 := sub<L | [L | L ! v : v in lc[1]]>;
+            lat["norm1_rank"] := Rank(R1);
+            if Rank(R1) eq 0 or Rank(R1) eq n then
+                lat["norm1_complement"] := "\\N";
+            else
+                lat["norm1_complement"] := FindLabel(OrthogonalComplementFaster(L, R1) : Timeout := timeout);
+            end if;
 
-        sv2 := ShortVectors(L, 1, 2);
-        R := sub<L|[x[1] : x in sv2]>;
-        lat["root_sublattice"] := RootString(R);
-
-        if Rank(R) eq 0 or Rank(R) eq n then
-            lat["root_complement"] := "\\N";
-        else
-            lat["root_complement"] := FindLabel(OrthogonalComplementFaster(L, R));
+            R := sub<L | [L | L ! v : v in lc[2]]>;
+            if Rank(R) eq 0 or Rank(R) eq n then
+                lat["root_complement"] := "\\N";
+            else
+                lat["root_complement"] := FindLabel(OrthogonalComplementFaster(L, R) : Timeout := timeout);
+            end if;
         end if;
         end if;   // definite: norm-1 and root sublattices
 

@@ -22,13 +22,13 @@ intrinsic StringToReal(s::MonStgElt) -> RngIntElt
     return #t eq 1 select RealField()!n else RealField()!n + s*RealField()!StringToInteger(t[2])/10^#t[2];
 end intrinsic;
 
-intrinsic ThetaSeriesIncremental(L::Lat, target_prec::RngIntElt, timeout::RngIntElt) -> SeqEnum, RngIntElt, Assoc
-{Compute the theta series coefficients of L, doubling the precision until either target_prec is reached or the time budget timeout (in seconds) is exhausted. Returns the coefficient sequence obtained, the precision actually reached, and an associative array mapping each precision computed to the time (in seconds) it took to compute the theta series to that precision.}
+intrinsic ThetaSeriesIncremental(L::Lat, target_prec::RngIntElt, timeout::RngIntElt : Min := 0) -> SeqEnum, RngIntElt, Assoc
+{Compute the theta series coefficients of L, doubling the precision until either target_prec is reached or the time budget timeout (in seconds) is exhausted. Returns the coefficient sequence obtained, the precision actually reached, and an associative array mapping each precision computed to the time (in seconds) it took to compute the theta series to that precision.  Min is the minimum of L if known (0 if not); it only sets the starting precision, and is a parameter so that this never computes the minimum itself outside a TimeoutCall.}
     best_theta := [];
     best_prec := 0;
     theta_elapsed := AssociativeArray();
     remaining := timeout;
-    prec := Maximum(16, Minimum(L) + 4);
+    prec := Maximum(16, Min + 4);
     while prec le target_prec and remaining gt 0 do
         current_prec := Minimum(prec, target_prec);
         success, theta, elapsed := TimeoutCall(remaining, ThetaSeries, <L, current_prec - 1>, 1 : HardKill := true);
@@ -94,11 +94,58 @@ function RescaledDualNF(L)
     return NumberFieldLattice(Rows(ChangeRing(B, K)) : InnerProduct := ChangeRing(M,K));
 end function;
 
-function adjacency_matrix_of(G, p)
+function hecke_data_of(G, p)
     // Wrapped so it can run under TimeoutCall: AdjacencyMatrix walks the p-neighbour graph
     // in a C-level builtin that does not yield to Magma's Alarm, so it needs the HardKill
-    // watchdog to be bounded (it can take >75s for a single rank-8 genus).
-    return AdjacencyMatrix(G, p);
+    // watchdog to be bounded (it can take >75s for a single rank-8 genus).  The
+    // characteristic polynomial and its factorisation are dense in the class number, so
+    // they run in the same child.
+    Ap := AdjacencyMatrix(G, p);
+    fpf := Factorization(CharacteristicPolynomial(Ap));
+    return Ap, [(<Coefficients(pair[1]), pair[2]>) : pair in fpf];
+end function;
+
+// Per-lattice computations that run in HardKill children (see the loop in FillGenus).
+// The batch process itself must make no call that can run unbounded: nothing outside
+// can interrupt it, so one stuck builtin there hangs the whole batch.  The children
+// are grouped because at low rank the fork, not the computation, is the cost: a
+// HardKill TimeoutCall costs ~7-15 ms of wall-clock in a fill batch, against well
+// under 1 ms for each of these at rank 4.
+
+// The minimum and what is read off it (Magma caches it on L, so the kissing number,
+// density and Hermite number reuse it), the root system, and the minimum of the
+// rescaled dual D, which sets where its theta series starts.
+function minimum_data(L, D)
+    m := Minimum(L);
+    roots := m ge 3 select "0" else RootString(L : IsRootSystem := false);
+    return m, KissingNumber(L), Density(L), HermiteNumber(L), roots, Minimum(D);
+end function;
+
+function root_string_of(L)
+    return RootString(L : IsRootSystem := false);
+end function;
+
+function successive_minima_of(L)
+    minima, _ := SuccessiveMinima(L);
+    return minima;
+end function;
+
+// The Festi-Veniani index and the SmallGroups label of the automorphism group ("\N"
+// when IdentifyGroup cannot handle the order).  The discriminant group's automorphism
+// group order and invariants are returned so that the caller can check them against
+// the genus: an assert in the child would only make the call fail quietly.
+function aut_data(Lcanon, aut_group, disc_aut_size)
+    LD := Dual(Lcanon : Rescale:=false);
+    discL, quo := LD/Lcanon;
+    disc_aut := AutomorphismGroup(discL);
+    gens_disc := [discL.i : i in [1..Ngens(discL)]];
+    im_aut := [hom< discL -> discL | [quo(x@@quo*ChangeRing(alpha, Rationals())): x in gens_disc]> : alpha in Generators(aut_group)];
+    aut_label := "\\N";
+    if CanIdentifyGroup(#aut_group) then
+        Aid := IdentifyGroup(aut_group);
+        aut_label := Sprintf("%o.%o", Aid[1], Aid[2]);
+    end if;
+    return disc_aut_size div #sub<disc_aut | im_aut>, #disc_aut, Invariants(discL), aut_label;
 end function;
 
 function SphereVolume(n)
@@ -122,38 +169,103 @@ function coeff(f, i)
     return i le #f select f[i] else 0;
 end function;
 
+// Once per process, before the first genus (FillGenus and ConnectGenus both call it):
+// run each kind of per-lattice computation on two fixed small lattices, here in the
+// batch process.  Magma initialises a lot lazily on first use (the SmallGroups
+// database, real constants, factorisation and enumeration machinery), and the
+// children FillGenus forks inherit whatever the batch process has initialised, but
+// discard what they initialise themselves.  When the
+// minimum, density, IdentifyGroup and the Hecke polynomials were computed in the
+// batch process this happened as a side effect; once they moved into HardKill
+// children, every child paid it again, and fill took ~1.5x as long at rank <= 4.
+// The inputs are fixed and tiny, so this is bounded (~0.1 s).
+fill_warm := NewStore();
+
+intrinsic WarmLatticeCaches()
+{Initialise, once per process, what the per-lattice computations of fill and connect
+initialise lazily, so that the TimeoutCall children they fork inherit it.}
+    if StoreIsDefined(fill_warm, "done") then return; end if;
+    E8 := LatticeWithGram(CartanMatrix("E8"));
+    W2 := LatticeWithGram(DiagonalJoin(CartanMatrix("A2"), Matrix(Integers(), 1, 1, [6])));
+    for W in [E8, W2] do
+        _ := Minimum(W); _ := KissingNumber(W); _ := Density(W); _ := HermiteNumber(W);
+        _ := SuccessiveMinima(W); _ := RootString(W : IsRootSystem := false);
+        _ := ThetaSeries(W, 20); _ := ThetaSeries(Dual(W), 20);
+        _ := CanonicalForm(GramMatrix(W));
+        _ := GroupToString(AutomorphismGroupFaster(W) : use_id := false);
+        // connect
+        _ := IsIsomorphic(W, LatticeWithGram(GramMatrix(W)));
+        _ := OrthogonalDecompositionFaster(W);
+        _ := BVHash(W, 1, 3);
+        _ := EvenSublattice(W);
+    end for;
+    _ := IdentifyGroup(SmallGroup(12, 3));
+    _ := Factorization(CharacteristicPolynomial(Matrix(Integers(), 2, 2, [1, 2, 3, 4])));
+    _ := #AutomorphismGroup(AbelianGroup([2, 6]));
+    StoreSet(fill_warm, "done", true);
+end intrinsic;
+
+// Two optional integer keys, larger first.  A key that was not computed ("\N": its
+// TimeoutCall overran or failed) sorts after every computed one.  Comparing only when both are
+// present, as cmp_lat used to, is not transitive once some keys are missing
+// (a ~ b ~ c with a < c), and Sort then returns an order that depends on the order
+// the classes were enumerated in.
+function cmp_int_desc(a, b)
+    ka := Type(a) eq RngIntElt;
+    kb := Type(b) eq RngIntElt;
+    if ka and kb then return b - a; end if;
+    if ka ne kb then return ka select -1 else 1; end if;
+    return 0;
+end function;
+
+// Two stored theta series, coefficient by coefficient, smaller first.  A coefficient
+// at or past a series' precision is unknown and sorts after every known one, so
+// that two series are compared as fixed sequences and the order stays transitive
+// when the precisions differ.
+function cmp_theta(f1, p1, f2, p2)
+    if Type(f1) ne SeqEnum then p1 := 1; end if;
+    if Type(f2) ne SeqEnum then p2 := 1; end if;
+    for i in [1..Maximum(p1, p2) - 1] do
+        k1 := i lt p1;
+        k2 := i lt p2;
+        if k1 ne k2 then return k1 select -1 else 1; end if;
+        d := coeff(f1, i) - coeff(f2, i);
+        if d ne 0 then return d; end if;
+    end for;
+    return 0;
+end function;
+
 // Sort order of the lattices of a genus (records as built in FillGenus); file level
-// so tests/test_fill_sort.m can exercise it.
+// so tests/test_fill_sort.m can exercise it.  The order fixes the labels.  Every key
+// but the last can be missing when its computation timed out, so labels are fixed by
+// the run that enumerates the genus, not by the genus alone; a missing key sorts
+// after every present one, which keeps this a total preorder.
 function cmp_lat(L1, L2)
     n := Isqrt(#L1["gram"]);
     // 1. automorphism group size (larger first)
-    if Type(L1["aut_size"]) eq RngIntElt and Type(L2["aut_size"]) eq RngIntElt then
-        d := L2["aut_size"] - L1["aut_size"];
-        if (d ne 0) then return d; end if;
-    end if;
+    d := cmp_int_desc(L1["aut_size"], L2["aut_size"]);
+    if d ne 0 then return d; end if;
     // 2. density (denser first); within a genus the determinant is fixed, so we
     //    sort by the minimum as a proxy (larger minimum = denser)
-    if Type(L1["minimum"]) eq RngIntElt and Type(L2["minimum"]) eq RngIntElt then
-        d := L2["minimum"] - L1["minimum"];
-        if (d ne 0) then return d; end if;
+    d := cmp_int_desc(L1["minimum"], L2["minimum"]);
+    if d ne 0 then return d; end if;
+    // 3. root system (larger first, see CompareRootStrings)
+    r1 := L1["root_sublattice"];
+    r2 := L2["root_sublattice"];
+    if r1 ne "\\N" and r2 ne "\\N" then
+        d := CompareRootStrings(r1, r2);
+        if d ne 0 then return d; end if;
+    elif r1 ne r2 then
+        return r1 ne "\\N" select -1 else 1;
     end if;
-    // 3. theta series
-    if Type(L1["theta_series"]) eq SeqEnum and Type(L2["theta_series"]) eq SeqEnum then
-        prec := Minimum(L1["theta_prec"], L2["theta_prec"]);
-        for i in [1..prec - 1] do
-            d := coeff(L1["theta_series"], i) - coeff(L2["theta_series"], i);
-            if (d ne 0) then return d; end if;
-        end for;
-    end if;
-    // 4. dual theta series
-    if Type(L1["dual_theta_series"]) eq SeqEnum and Type(L2["dual_theta_series"]) eq SeqEnum then
-        prec := Minimum(L1["dual_theta_prec"], L2["dual_theta_prec"]);
-        for i in [1..prec - 1] do
-            d := coeff(L1["dual_theta_series"], i) - coeff(L2["dual_theta_series"], i);
-            if (d ne 0) then return d; end if;
-        end for;
-    end if;
-    // 5. arbitrary tiebreaker: the (reduced) Gram matrix entries
+    // 4. theta series
+    d := cmp_theta(L1["theta_series"], L1["theta_prec"], L2["theta_series"], L2["theta_prec"]);
+    if d ne 0 then return d; end if;
+    // 5. dual theta series
+    d := cmp_theta(L1["dual_theta_series"], L1["dual_theta_prec"], L2["dual_theta_series"], L2["dual_theta_prec"]);
+    if d ne 0 then return d; end if;
+    // 6. tiebreaker: the Gram matrix entries (canonical when CanonicalForm finished,
+    //    else the LLL-reduced Gram matrix, which depends on the enumeration)
     for i in [1..n^2] do
         d := L1["gram"][i] - L2["gram"][i];
         if (d ne 0) then return d; end if;
@@ -188,6 +300,7 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).
 stats writes one fill_stats/ record per genus (fill_stats.format): which guard, if any,
 decided the outcome, the class number, per-phase wall-clock and the slowest single
 lattice -- the data for calibrating the guards (calibrate_fill.py).}
+    WarmLatticeCaches();
     genus_t0 := Realtime();
     data := Split(Split(Read(LabelPath("genera_basic", label)), "\n")[1], "|");
     basic_format := Split(Read("genera_basic.format"), "|");
@@ -278,17 +391,15 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
             // HardKill watchdog.  If it overruns we drop the (optional) Hecke data for
             // this genus -- the class number is already recorded -- rather than let a few
             // genera dominate wall-clock.
-            adj_success, adj_out, adj_elapsed := TimeoutCall(timeout, adjacency_matrix_of, <G, p>, 1 : HardKill := true);
+            adj_success, adj_out, adj_elapsed := TimeoutCall(timeout, hecke_data_of, <G, p>, 2 : HardKill := true);
             if not adj_success then
                 vprintf FillGenus, 1 : "(timed out after ~%os, skipping Hecke data)\n", timeout;
                 adj_ok := false;
                 break;
             end if;
-            Ap := adj_out[1];
             vprintf FillGenus, 1 : "computed in %o seconds\n", adj_elapsed;
-            fpf := Factorization(CharacteristicPolynomial(Ap));
-            hecke_mats[p] := Ap;
-            hecke_polys[p] := [(<Coefficients(pair[1]), pair[2]>) : pair in fpf];
+            hecke_mats[p] := adj_out[1];
+            hecke_polys[p] := adj_out[2];
           end for;
           adj_status := adj_ok select "ok" else "timeout";
           if adj_ok then
@@ -321,10 +432,11 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
 
     if (#reps gt 0) then
         // PER-OPERATION timeout, NOT a per-lattice aggregate: to_per_rep is passed
-        // independently to CanonicalForm, AutomorphismGroupFaster, the primal theta series
-        // and the dual theta series below, so a single lattice can spend up to ~4*to_per_rep
-        // (plus the unbounded Minimum/kissing work between them).  The aggregate wall-clock
-        // guard is the per-GENUS timelimit checked at the top of this loop, not this value.
+        // independently to CanonicalForm, AutomorphismGroupFaster, the primal theta series,
+        // the dual theta series and each of the smaller guarded calls below (minimum,
+        // root system, successive minima, ...), so a single lattice can spend several
+        // multiples of to_per_rep.  The aggregate wall-clock guard is the per-GENUS
+        // timelimit checked at the top of this loop, not this value.
         // perlattice gives every operation the same budget regardless of class number; the
         // old timeout/#reps split a fixed budget across the representatives, which starved
         // precisely the large genera (class number 55 at timeout 300 => 6s per operation,
@@ -390,6 +502,7 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
         lat["dual_theta_series"] := "\\N";
         lat["dual_theta_prec"] := "\\N";
         lat["successive_minima"] := "\\N";
+        lat["root_sublattice"] := "\\N";
         // Only set below in the positive-definite (n eq s) branch; default them here
         // so the indefinite case still has every column.
         lat["center_density"] := "\\N";
@@ -439,28 +552,45 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
                 lat["aut_group"] := GroupToString(aut_group : use_id:=false);
                 lat["aut_size"] := #aut_group;
                 lat["is_chiral"] := &and[Determinant(g) eq 1 : g in Generators(aut_group)];
-                // double checking, but also useful for festi-veniani
-                LD := Dual(Lcanon : Rescale:=false);
-                discL, quo := LD/Lcanon;
-                disc_aut := AutomorphismGroup(discL);
-                assert disc_aut_size eq #disc_aut;
-                assert disc_invs eq Invariants(discL);
-                gens_disc := [discL.i : i in [1..Ngens(discL)]];
-                im_aut := [hom< discL -> discL | [quo(x@@quo*ChangeRing(alpha, Rationals())): x in gens_disc]> : alpha in Generators(aut_group)];
-                lat["festi_veniani_index"] := disc_aut_size div #sub<disc_aut | im_aut>;
-                if CanIdentifyGroup(#aut_group) then
-                    Aid := IdentifyGroup(aut_group);
-                    lat["aut_label"] := Sprintf("%o.%o", Aid[1], Aid[2]);
+                // the discriminant group is checked against the genus here, and is
+                // also what the Festi-Veniani index needs
+                ok, ad := TimeoutCall(to_per_rep, aut_data, <Lcanon, aut_group, disc_aut_size>, 4 : HardKill := true);
+                if ok then
+                    assert disc_aut_size eq ad[2];
+                    assert disc_invs eq ad[3];
+                    lat["festi_veniani_index"] := ad[1];
+                    lat["aut_label"] := ad[4];
                 end if;
             end if;
-            lat["density"] := Density(L);
-            lat["center_density"] := lat["density"] / SphereVolume(n);
-            lat["hermite"] := HermiteNumber(L);
-            lat["kissing"] := KissingNumber(L);
-            m := Minimum(L);
-            lat["minimum"] := m;
+            D := Dual(L);
+            // LLL always finishes (polynomial time), so it is safe here in the batch
+            // process, and it caches a reduced basis on L and D that every child below
+            // inherits; without it each theta-series child redoes that work (~4 ms per
+            // child at rank 4, measured -- it was the unguarded Minimum here that used
+            // to warm this cache).
+            _ := LLL(L);
+            _ := LLL(D);
+            m := 0;    // the minimum, 0 while unknown
+            dm := 0;   // the dual's minimum, likewise
+            ok, md := TimeoutCall(to_per_rep, minimum_data, <L, D>, 6 : HardKill := true);
+            if ok then
+                m := md[1];
+                lat["minimum"] := m;
+                lat["kissing"] := md[2];
+                lat["density"] := md[3];
+                lat["center_density"] := md[3] / SphereVolume(n);
+                lat["hermite"] := md[4];
+                lat["root_sublattice"] := md[5];
+                dm := md[6];
+            else
+                // The root system is a sort key (cmp_lat), so try it on its own:
+                // enumerating vectors of norm <= 2 can be much cheaper than finding
+                // the minimum.
+                ok, rs := TimeoutCall(to_per_rep, root_string_of, <L>, 1 : HardKill := true);
+                if ok then lat["root_sublattice"] := rs[1]; end if;
+            end if;
             target_prec := Max(150, m+4);
-            theta, theta_prec, rep_theta_elapsed := ThetaSeriesIncremental(L, target_prec, to_per_rep);
+            theta, theta_prec, rep_theta_elapsed := ThetaSeriesIncremental(L, target_prec, to_per_rep : Min := m);
             for p in Keys(rep_theta_elapsed) do
                 theta_elapsed[p] := IsDefined(theta_elapsed, p)
                     // Maximum for worst case Hash computation.
@@ -494,8 +624,7 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
             end if;
             // Dual theta series (used as a tie-breaker in cmp_lat below, and stored
             // alongside the primal theta series).
-            D := Dual(L);
-            dual_theta, dual_theta_prec := ThetaSeriesIncremental(D, Max(150, Minimum(D) + 4), to_per_rep);
+            dual_theta, dual_theta_prec := ThetaSeriesIncremental(D, Max(150, dm + 4), to_per_rep : Min := dm);
             if dual_theta_prec gt 0 then
                 lat["dual_theta_series"] := dual_theta;
                 lat["dual_theta_prec"] := dual_theta_prec;
@@ -503,13 +632,10 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
                 lat["dual_theta_series"] := [1];
                 lat["dual_theta_prec"] := 1;
             end if;
-            //success, minima, elapsed := TimeoutCall(to_per_rep, SuccessiveMinima, <L>, 2);
-            //vprintf FillGenus, 1 : "Successive minima computed in %o seconds\n", elapsed;
-            //if success then 
-            //lat["successive_minima"] := minima[1]; // For now, we throw away the vecs
-            //end if;
-            minima, vecs := SuccessiveMinima(L);
-            lat["successive_minima"] := minima;
+            ok, minima := TimeoutCall(to_per_rep, successive_minima_of, <L>, 1 : HardKill := true);
+            if ok then
+                lat["successive_minima"] := minima[1];
+            end if;
 
         end if;
         lat["hash"] := "\\N";
@@ -534,18 +660,10 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
     vprintf FillGenus, 1 : "Done!\n";
 
 
-    // Tie breaker
-
-    // Need dual_label, dual_conway
-    // Compute festi_veniani_index in Sage?
-    // Need label for lattice.  Don't want the label to rely on a difficult computation.  So we should probably avoid using the canonical form, and maybe avoid the automorphism group.
-    // Proposal: Sort lexicographically by:
-    // 1. Size of automorphism group (larger first): unfortunately this may be hard to compute
-    // 2. Density - sort by minimum instead
-    // 3. theta series
-    // 4. dual theta series
-    // 5. arbitrary tiebreaker
-    // TODO: Sort reps according to canonical form?
+    // Label order (cmp_lat): automorphism group size, minimum, root system, theta
+    // series, dual theta series, then the Gram matrix.  Any of the first five can be
+    // missing when its computation timed out, so the labels are fixed by the run that
+    // enumerates the genus rather than by the genus alone.
     if (n eq s) then
         Sort(~lats, cmp_lat, ~perm);
     end if;

@@ -27,7 +27,13 @@ pipe-separated columns of the corresponding records.
    hashes, `is_universal`/`is_even_universal`, ...).  Writes
    `lattice_basic_data/`, `lattice_hashes/`, `genera_advanced/`.  Guarded by
    `--enum-masslimit/-timeout/-timelimit/-sizelimit/-adjlimit/-per-lattice-timeout`
-   so pathological genera are bounded rather than hanging.
+   so pathological genera are bounded rather than hanging.  The classes of a
+   definite genus are sorted by automorphism group order (larger first), minimum
+   (larger first), root system (`RootString`/`CompareRootStrings` in
+   [`orth_dec.mag`](orth_dec.mag), larger first), theta series, dual theta
+   series and Gram matrix (`cmp_lat`), and that order is the label tiebreaker.
+   A key whose computation timed out sorts after every computed one, so the
+   labels are fixed by the run that enumerates the genus.
 3. **Tensor products** (Magma, [`run_tensor.m`](run_tensor.m)).
 4. **Names** (Magma, [`run_basic_names.m`](run_basic_names.m)): atomic lattice
    names, merged across workers.
@@ -154,7 +160,11 @@ child's exit moves the parent's read position in the script file, and the
 parent then misparses the rest of it.  Note also that `TimeoutCall`'s
 child-side `Alarm` cannot interrupt a single long C-level call; pass
 `HardKill := true` (a watchdog that SIGKILLs the child, ~10 ms per call) for
-anything that may enter one — see `Parallel.magma/TimeoutCall.m`.
+anything that may enter one — see `Parallel.magma/TimeoutCall.m`.  Fill and
+connect run every per-lattice computation that can run unbounded this way;
+nothing can interrupt the batch process itself.  A child discards whatever Magma
+initialises lazily on first use, so `WarmLatticeCaches` (in
+[`fill_genus.m`](fill_genus.m)) initialises it once in the batch process.
 
 ## Calibrating the fill stage
 

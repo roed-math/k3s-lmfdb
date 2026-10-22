@@ -163,13 +163,16 @@ intrinsic SetHashes(~lats::SeqEnum[Assoc], ~genus::Assoc, theta_elapsed::Assoc, 
     end if;
 
     // Now check BV options
-    min_norm := Minimum([lat["minimum"] : lat in lats]);
+    // "\N" where the minimum timed out (FillGenus computes it under a TimeoutCall)
+    minima := [Integers() | lat["minimum"] : lat in lats | Type(lat["minimum"]) eq RngIntElt];
+    min_norm := #minima gt 0 select Minimum(minima) else 3;
     if min_norm lt 3 then min_norm := 3; end if;
     BVvals := AssociativeArray();
     lattices := [lat["lattice"] : lat in lats];
     for m in [min_norm..min_norm+3] do
         // TODO: if there are too many vectors of norm up to m we can bail before calling BVhashes
-        success, res, elapsed := TimeoutCall(timeout, BVhashes, <lattices, genus_hash, m>, 1);
+        // HardKill: BVhashes enumerates vectors with ShortVectors, which Alarm cannot interrupt
+        success, res, elapsed := TimeoutCall(timeout, BVhashes, <lattices, genus_hash, m>, 1 : HardKill := true);
         if success then
             res := res[1];   // TimeoutCall wraps the results in a List; unwrap to the hash sequence
             dcount := #{h : h in res};
