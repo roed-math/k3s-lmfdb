@@ -1,16 +1,21 @@
 // Genus representatives of indefinite binary lattices with non-square
-// discriminant must be ISOMETRY classes (genus_reps.m, genus_reps_Magma).
-// Magma's GenusRepresentatives can return two proper classes that are mirror
-// images (a, b, c) ~ (a, -b, c) of each other, i.e. the same lattice.
+// discriminant must be the ISOMETRY classes of the genus (genus_reps.m,
+// genus_reps_Magma).  Unpatched Magma's GenusRepresentatives gets these wrong --
+// lattices outside the genus, missing classes, a class next to its mirror image
+// -- so this suite fails on it; the fix is magma_patches/.  Class numbers below
+// were checked with Sage (BinaryQF_reduced_representatives plus Genus).
 AttachSpec("lattices.spec");
 import "genus_reps.m" : genus_reps_Magma, binary_isometric, genus_reps_square_disc, square_disc_isometric, square_disc_key;
 load "tests/assertions.m";
 results := NewResults();
 
+ok, msg := MagmaBinaryGenusPatched();
+AssertTrue(~results, ok, "Magma carries magma_patches/BinaryGenusSpinor-2.30-1.patch: " * msg);
+
 Lat := func<g | LatticeWithGram(Matrix(Integers(), 2, 2, g) : CheckPositive := false)>;
 
-// x^2 - 37y^2: GenusRepresentatives gives 3 proper classes, {1, g, g^-1}; g and
-// g^-1 are mirror images, so the genus has 2 isometry classes.
+// x^2 - 37y^2: the genus has 3 proper classes, {1, g, g^-1}; g and g^-1 are
+// mirror images, so it has 2 isometry classes.
 reps := genus_reps_Magma(Lat([1, 0, 0, -37]));
 AssertEqual(~results, #reps, 2, "x^2 - 37y^2: class number");
 AssertTrue(~results, forall{R : R in reps | Genus(R) eq Genus(Lat([1, 0, 0, -37]))},
@@ -26,8 +31,15 @@ AssertTrue(~results, binary_isometric(Matrix(Integers(), 2, 2, [2, 1, 1, -13]),
                                       Matrix(Integers(), 2, 2, [2, -1, -1, -13])),
     "a form is isometric to its mirror");
 
-// Genera whose classes are already distinct isometry classes keep them all.
-AssertEqual(~results, #genus_reps_Magma(Lat([1, 0, 0, -79])), 3, "x^2 - 79y^2: class number");
+// x^2 - 79y^2: 3 proper classes, 2 isometry classes; unpatched Magma usually
+// returns 3 lattices, one of them from the other genus.
+reps := genus_reps_Magma(Lat([1, 0, 0, -79]));
+AssertEqual(~results, #reps, 2, "x^2 - 79y^2: class number");
+AssertTrue(~results, forall{R : R in reps | Genus(R) eq Genus(Lat([1, 0, 0, -79]))},
+    "x^2 - 79y^2: reps lie in the genus");
+// x^2 - 34y^2: -x^2 + 34y^2 is a second class in the same genus, which unpatched
+// Magma never returned.
+AssertEqual(~results, #genus_reps_Magma(Lat([1, 0, 0, -34])), 2, "x^2 - 34y^2: class number");
 AssertEqual(~results, #genus_reps_Magma(Lat([2, 1, 1, -13])), 1, "[[2,1],[1,-13]]: class number");
 // definite binary genera are untouched (Magma already returns isometry classes)
 AssertEqual(~results, #genus_reps_Magma(Lat([2, 1, 1, 12])), 2, "[[2,1],[1,12]]: class number");

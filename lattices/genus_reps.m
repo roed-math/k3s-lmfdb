@@ -96,13 +96,14 @@ function genus_reps_Magma(L)
     // without throwing a runtime error.
     if IsPositiveDefinite(GramMatrix(L)) or (Rank(L) eq 2) then
       reps := GenusRepresentatives(L : Bound := Infinity());
-      // For indefinite binary lattices GenusRepresentatives can return two PROPER
-      // classes that are mirror images (a, b, c) and (a, -b, c) of each other, i.e.
-      // the same lattice: the genus of x^2 - 37y^2 came back with 3 representatives
-      // but has 2 isometry classes, so class_number was too large and one lattice
-      // was stored twice under two labels.  Keep one representative per isometry
-      // class.  (Square discriminants never get here -- genus_reps_square_disc --
-      // and the definite case already returns isometry classes.)
+      // Unpatched Magma (2.30-1 and presumably earlier) gets indefinite binary
+      // genera wrong: its BinaryGenusRepresentatives can return lattices outside the
+      // genus, miss classes, and return a class together with its mirror image.  The
+      // fix is magma_patches/BinaryGenusSpinor-2.30-1.patch, and run_all.py refuses
+      // to fill without it (MagmaBinaryGenusPatched below).  Keeping one
+      // representative per isometry class is then a no-op, kept as a guard.
+      // (Square discriminants never get here -- genus_reps_square_disc -- and the
+      // definite case already returns isometry classes.)
       G := GramMatrix(L);
       if Rank(L) eq 2 and not IsPositiveDefinite(G) and not IsPositiveDefinite(-G) then
         kept := [];
@@ -121,6 +122,25 @@ function genus_reps_Magma(L)
     return [LatticeWithGram(ChangeRing(GramMatrix(r), Integers()) :
 			    CheckPositive := false) : r in reps];
 end function;
+
+intrinsic MagmaBinaryGenusPatched() -> BoolElt, MonStgElt
+{Whether this Magma's GenusRepresentatives is right on indefinite binary lattices,
+i.e. carries magma_patches/BinaryGenusSpinor-2.30-1.patch, and if not, a description
+of the first failure.  Each case fails on unpatched 2.30-1: x^2 - 34y^2 with Proper
+on every seed tried, x^2 - 79y^2 in about 49 calls in 50.}
+    lat := func<g | LatticeWithGram(Matrix(Integers(), 2, 2, g) : CheckPositive := false)>;
+    // <gram, Proper, number of classes>, the numbers checked with Sage
+    for t in [<[1, 0, 0, -34], true, 2>, <[1, 0, 0, -79], false, 2>, <[1, 0, 0, -79], true, 3>,
+              <[1, 0, 0, -37], false, 2>] do
+        L := lat(t[1]);
+        R := GenusRepresentatives(L : Proper := t[2]);
+        if #R ne t[3] or exists{M : M in R | Genus(M) ne Genus(L)} then
+            return false, Sprintf("GenusRepresentatives(%o : Proper := %o) returned %o lattices, expected %o; in the genus: %o",
+                                  t[1], t[2], #R, t[3], [Genus(M) eq Genus(L) : M in R]);
+        end if;
+    end for;
+    return true, "";
+end intrinsic;
 
 function genus_reps_Logan(L)
     // neighbours was renamed neighbours_old when list_genus took over; keep the

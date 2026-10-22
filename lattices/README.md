@@ -109,6 +109,13 @@ must be on `PATH` for the GNU parallel stages; on macOS the default install
 location is not on `PATH`, so run the pipeline with
 `PATH="/Applications/Magma:$PATH"`.
 
+Magma must also carry the patch in [`magma_patches/`](magma_patches): without it
+`GenusRepresentatives` returns wrong classes for indefinite binary lattices
+(lattices from another genus, missing classes).  Apply it from Magma's root
+directory with `patch -p0 < .../magma_patches/BinaryGenusSpinor-2.30-1.patch`;
+`magma -b check_magma.m` (from `lattices/`) prints `MAGMA_OK` once it is in, and
+`run_all.py` runs that check before the fill stage.
+
 ### SageMath
 
 Sage 10.x provides the Python that `run_all.py` runs under (`sage -python`),

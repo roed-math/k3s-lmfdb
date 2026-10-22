@@ -63,6 +63,7 @@ parser.add_argument("--embed-timelimit", type=int, default=3600, help="Wall-cloc
 parser.add_argument("--memlimit", type=int, default=32, help="Memory cap in GB for each Magma process in the fill and connect stages (SetMemoryLimit; 0 = none).  A job can hold two processes at once (the batch and a TimeoutCall child), so budget ~2x this per -j slot.  A child over the cap dies and that computation counts as failed; a batch process over it ends, and run_fill_genus.sh reports its unfinished genera.  Without a cap, rank-17 genera on the C=32768 census ran Magma processes up to 220 GB.")
 parser.add_argument("--fill-stats", action="store_true", help="Have FillGenus write one fill_stats/<rank>/<nplus>/<label> record per genus (fields in fill_stats.format): the outcome -- ok, or which guard decided it (mass_skip, enum_fail, size_skip, time_discard) -- the class number, per-phase wall-clock and the slowest single lattice.  Off by default (it is another file per genus); calibrate_fill.py turns it on.")
 parser.add_argument("--skip-list-genera", action="store_true", help="Assume that genera have already been listed")
+parser.add_argument("--allow-unpatched-magma", action="store_true", help="Fill even if Magma fails check_magma.m.  Unpatched Magma gets indefinite binary genera wrong (classes outside the genus, missing classes); the census must not be run with it.  See magma_patches/.")
 parser.add_argument("--skip-enumerate-genera", action="store_true", help="Skip the fill stage (genus enumeration).  This does NOT imply --skip-list-genera: listing still runs unless that is also given, which is how the census listing was run (listing only, with --skip-embeddings).")
 parser.add_argument("--skip-embeddings", action="store_true", help="Do not compute primitive and K3 embedding data")
 parser.add_argument("--skip-tensor", action="store_true", help="Do not compute tensor product decompositions")
@@ -430,6 +431,12 @@ def main():
 
     gcount = build_enumeration_inputs("genus_jobs.txt")   # full list, used by the connect stages
     if not args.skip_enumerate_genera:
+        # Unpatched Magma returns wrong classes for indefinite binary genera.
+        # Require the success line: an error inside Magma can still exit 0.
+        check = subprocess.run(["magma", "-b", "check_magma.m"], capture_output=True, text=True)
+        print(check.stdout.strip(), flush=True)
+        if "MAGMA_OK" not in check.stdout and not args.allow_unpatched_magma:
+            sys.exit("Stopping: patch Magma (magma_patches/) or pass --allow-unpatched-magma.")
         # Work DOWNWARD by rank, with a barrier between ranks.  The orbit method
         # enumerates a definite genus by descending from a parent genus of rank+1
         # and smaller determinant, and FillGenus persists every finished definite
