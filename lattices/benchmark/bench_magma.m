@@ -148,10 +148,20 @@ function applies(task, variant, c)
     return definite(c);
 end function;
 
+// The pipeline runs AutomorphismGroupFaster on an LLL-reduced Gram matrix (fill's
+// canonical or LLL gram), and it is very slow on unreduced bases: E8+E8 in bases
+// with entries up to ~100 took over 60 s in 9 of 10 cases, against 0.07 s once
+// reduced (stock AutomorphismGroup: 0.02 s either way).  So the default variant
+// reduces first, as fill does.
+function reduced(L)
+    return LatticeWithGram(LLLGram(GramMatrix(L)));
+end function;
+
 // M: the partner's Gram matrix for the isometry tasks (see next_grams)
 function setup(task, variant, L, c, M)
     if task in ["aut_label", "disc_image"] then
-        return AutomorphismGroupFaster(L);
+        Lr := reduced(L);
+        return <Lr, AutomorphismGroupFaster(Lr)>;
     elif task in ["isometric_same", "isometric_other"] then
         return lattice(M);
     end if;
@@ -173,11 +183,11 @@ function run(task, variant, L, st, c, timeout)
     when "mass":
         return <Sprint(Mass(L)), "">;
     when "aut_order":
-        G := variant eq "stock" select AutomorphismGroup(L) else AutomorphismGroupFaster(L);
+        G := variant eq "stock" select AutomorphismGroup(L) else AutomorphismGroupFaster(reduced(L));
         return <Sprint(#G), "">;
     when "aut_label":
-        if not CanIdentifyGroup(#st) then return <"@@UNSUPPORTED", "">; end if;
-        id := IdentifyGroup(st);
+        if not CanIdentifyGroup(#st[2]) then return <"@@UNSUPPORTED", "">; end if;
+        id := IdentifyGroup(st[2]);
         return <Sprintf("%o.%o", id[1], id[2]), "">;
     when "minimum":
         return <Sprint(Minimum(L)), "">;
@@ -201,14 +211,26 @@ function run(task, variant, L, st, c, timeout)
         // As aut_data in fill_genus.m: the image of O(L) in the automorphism group of
         // the discriminant group.  extra records |Aut(L^#/L)|, which fill divides by
         // the image order for festi_veniani_index (Oscar's extra is |O(q_L)|).
-        LD := Dual(L : Rescale := false);
-        A, quo := LD / L;
+        Lr, aut := Explode(st);           // the group acts in Lr's basis
+        LD := Dual(Lr : Rescale := false);
+        A, quo := LD / Lr;
         AA := AutomorphismGroup(A);
         gens := [A.i : i in [1..Ngens(A)]];
-        im := [hom< A -> A | [quo(x @@ quo * ChangeRing(alpha, Rationals())) : x in gens] > : alpha in Generators(st)];
+        im := [hom< A -> A | [quo(x @@ quo * ChangeRing(alpha, Rationals())) : x in gens] > : alpha in Generators(aut)];
         return <Sprint(#sub< AA | im >), Sprintf("AutA=%o", #AA)>;
     end case;
     error "unknown task", task;
+end function;
+
+usec := func< x | Sprint(Round(10^6 * x)) >;
+
+// CPU seconds (user + system) of this process, from /proc: Cputime() stays at 0 in a
+// TimeoutCall child, where every job runs.  Ticks are 1/100 s, as on Linux.
+function proc_cpu()
+    s := Read("/proc/self/stat");
+    i := Index(s, ")");                   // the command name may contain spaces
+    f := Split(s[i+2..#s], " ");          // f[1] is field 3 (state); utime, stime are 14, 15
+    return (StringToInteger(f[12]) + StringToInteger(f[13])) / 100;
 end function;
 
 // One block: K lattices on fresh Gram matrices (next_grams; k and used carry over
@@ -226,12 +248,11 @@ procedure block(task, variant, c, K, timeout, ~k, ~used, ~vals, ~wall, ~cpu, ~pr
         Append(~sts, setup(task, variant, L, c, M));
     end for;
     prep := Realtime(t);
-    t := Realtime(); u := Cputime();
+    t := Realtime(); u := proc_cpu();
     vals := [run(task, variant, Ls[i], sts[i], c, timeout) : i in [1..K]];
-    wall := Realtime(t); cpu := Cputime(u);
+    wall := Realtime(t); cpu := proc_cpu() - u;
 end procedure;
 
-usec := func< x | Sprint(Round(10^6 * x)) >;
 
 function measure(task, variant, c, timeout, min_time, max_reps)
     if not applies(task, variant, c) then return "unsupported\t0\t-\t-\t-\t-"; end if;

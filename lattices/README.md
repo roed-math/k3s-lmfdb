@@ -217,7 +217,7 @@ stores that both can compute, and checks that they agree:
 | --- | --- | --- |
 | `class_number` | `GenusReps` (stock: `GenusRepresentatives`) | `genus_representatives` (also `enumerate_definite_genus` `:orbit`/`:random`) |
 | `mass` | `Mass` | `mass` |
-| `aut_order` | `AutomorphismGroupFaster` (stock: `AutomorphismGroup`) | `isometry_group` (also `automorphism_group_order`) |
+| `aut_order` | `AutomorphismGroupFaster` on the `LLLGram`, as in fill (stock: `AutomorphismGroup`) | `isometry_group` (also `automorphism_group_order`) |
 | `aut_label` | `IdentifyGroup` | `small_group_identification` |
 | `minimum`, `kissing`, `successive_minima` | `Minimum`, `KissingNumber`, `SuccessiveMinima` | `minimum`, `kissing_number`, `successive_minima` |
 | `root_system` | `RootString` | `root_lattice_recognition` |
@@ -269,6 +269,10 @@ Julia cannot interrupt a computation, so `bench.py` kills and restarts the Oscar
 server on a timeout or past the memory limit (each restart costs that start-up
 again).  The Oscar server runs `GC.gc()` before each timed block, so a block does
 not pay for garbage left by earlier jobs.
+`AutomorphismGroupFaster` is very slow on unreduced bases (see `CLAUDE.md`), so
+the default Magma variant reduces first, as fill does; the stock intrinsics and
+Oscar reduce internally.  `report.md` also shows where the server time went, per
+system and task, from each job's total time (`job_s` in `results.tsv`).
 Measured this way, the pipeline's `class_number` includes `GenusReps`' own
 `TimeoutCall` fork (several ms), which dominates for small genera; the `stock`
 variant shows Magma without it.  The Magma server runs in an empty directory, so

@@ -70,7 +70,7 @@ SYSTEMS = ["magma", "oscar"]
 CASE_COLUMNS = ["id", "rank", "nplus", "det", "class_number", "mass", "theta_prec",
                 "gram", "gram_iso", "gram_other"]
 RESULT_COLUMNS = ["system", "case", "task", "variant", "status", "K", "wall_us", "cpu_us",
-                  "extra", "value", "finished"]
+                  "extra", "value", "finished", "job_s"]   # job_s: the whole job, as bench.py saw it
 # statuses that count against a group's --max-timeouts (a crash is usually the memory limit)
 HARD_FAIL = {"timeout", "oom", "crash"}
 
@@ -437,22 +437,24 @@ def cmd_run(a):
 
     lock = threading.Lock()
     new_file = not respath.exists() or a.redo
+    # Append in the existing file's columns (older files have no job_s).
+    columns = RESULT_COLUMNS if new_file else respath.read_text().split("\n", 1)[0].split("\t")
     R = open(respath, "w" if new_file else "a")
     if new_file:
         R.write("\t".join(RESULT_COLUMNS) + "\n")
     finished = Counter()
     status_counts = defaultdict(Counter)
     meta = {"started": time.strftime("%F %T"), "host": socket.gethostname(), "nproc": os.cpu_count(),
-            "loadavg_start": os.getloadavg(), "args": vars(a), "servers": {}}
+            "loadavg_start": os.getloadavg(), "args": vars(a), "servers": {}, "starts": {}}
     errors = []
 
     def record(sysname, cid, task, v, res):
         row = {"system": sysname, "case": cid, "task": task, "variant": v, "K": "0",
                "wall_us": "-", "cpu_us": "-", "extra": "-", "value": "-",
-               "finished": time.strftime("%F %T")}
+               "finished": time.strftime("%F %T"), "job_s": "-"}
         row.update(res)
         with lock:
-            R.write("\t".join(str(row[c]) for c in RESULT_COLUMNS) + "\n")
+            R.write("\t".join(str(row.get(c, "-")) for c in columns) + "\n")
             R.flush()
             finished[sysname] += 1
             status_counts[sysname][row["status"]] += 1
@@ -497,7 +499,10 @@ def cmd_run(a):
                             srv.wait_ready()
                             with lock:
                                 meta["servers"].setdefault(sysname, srv.ready)
+                                meta["starts"][sysname] = meta["starts"].get(sysname, 0) + 1
+                        t0 = time.time()
                         res = srv.request(cid, task, v)
+                        res["job_s"] = f"{time.time() - t0:.3f}"
                         break
                     except ServerDied as e:
                         srv.kill()
@@ -747,6 +752,33 @@ def cmd_report(a):
         F.write("task\tcase\tfirst\tsecond\n")
         for t, cid, x, y in mismatches:
             F.write(f"{t}\t{cid}\t{x}\t{y}\n")
+
+    # Where the server time went (job_s: each job as bench.py saw it, including the
+    # timed blocks' untimed preparation and the timeouts).
+    spent = defaultdict(lambda: [0, 0.0, 0])
+    for (sysname, cid, task, v), r in res.items():
+        js = r.get("job_s", "-")
+        if js not in ("-", None, ""):
+            e = spent[(sysname, task, v)]
+            e[0] += 1
+            e[1] += float(js)
+            e[2] += r["status"] in HARD_FAIL
+    if spent:
+        starts = Counter()
+        for m in metas:
+            starts.update(m.get("starts", {}))
+        L.append("## Where the server time went\n")
+        L.append("From `job_s` (whole jobs, timeouts included).  Server starts: "
+                 + ", ".join(f"{s} {k}" for s, k in sorted(starts.items()))
+                 + " (each one also costs the start-up and warm-up listed at the top).\n")
+        L.append("| system | task | variant | jobs | server hours | of which timeouts (count) |")
+        L.append("|---|---|---|---|---|---|")
+        for (sysname, task, v), (n, t, nto) in sorted(spent.items(), key=lambda x: -x[1][1]):
+            L.append(f"| {sysname} | {task} | {v} | {n} | {t / 3600:.2f} | {nto} |")
+        tot = defaultdict(float)
+        for (sysname, _, _), (_, t, _) in spent.items():
+            tot[sysname] += t
+        L.append("\nTotal: " + ", ".join(f"{s} {t / 3600:.1f} server hours" for s, t in sorted(tot.items())) + ".\n")
 
     errs = Counter()
     example = {}
