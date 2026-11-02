@@ -259,7 +259,7 @@ How it measures (details in the headers of
 [`bench_oscar.jl`](benchmark/bench_oscar.jl)): each system runs as a long-lived
 single-threaded server that `bench.py` feeds jobs over a pipe, warmed up first,
 so start-up and Julia compilation are not timed (`report.md` lists them; Oscar's
-warm-up took about 3 minutes on mimir).  Fast calls are timed in blocks of up to
+warm-up took about 2.5 minutes on mimir at load ~30, and 10 minutes at load ~150).  Fast calls are timed in blocks of up to
 10000 (1000 at rank 2), since Magma's clock has a 10 ms resolution, and every
 call gets its own Gram matrix U G U^t: while a lattice is
 referenced, Magma's `LatticeWithGram` returns that same object for an equal Gram
