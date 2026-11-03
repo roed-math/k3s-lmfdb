@@ -133,10 +133,16 @@ intrinsic SetHashes(~lats::SeqEnum[Assoc], ~genus::Assoc, theta_elapsed::Assoc, 
     genus["theta_distinguishing_prec"] := dprec;
     if distinguished then
         genus["is_theta_distinguished"] := true;
-    elif dprec ge GetThetaBound(rank, level, det, lats[1]["is_even"] eq "T") then
-        genus["is_theta_distinguished"] := false;
     else
-        genus["is_theta_distinguished"] := "\\N";
+        // GetThetaBound computes the dimension of a space of modular forms, which runs
+        // in this (the batch) process and can be unbounded: for rank 3 it asks for
+        // weight-1 forms (r div 2), which Magma cannot count by formula --
+        // GetThetaBound(3, 6279, 6279, false) did not return in 180 s, and on the
+        // C=32768 calibration test genus 3.3.6279.dc3 hung its fill batch for over an
+        // hour at up to 28 GB.  So it runs in a HardKill child; on an overrun the
+        // genus stays undecided.
+        ok, tb := TimeoutCall(timeout, GetThetaBound, <rank, level, det, lats[1]["is_even"] eq "T">, 1 : HardKill := true);
+        genus["is_theta_distinguished"] := (ok and dprec ge tb[1]) select false else "\\N";
     end if;
 
     hash_opts := [];
