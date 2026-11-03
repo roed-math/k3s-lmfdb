@@ -58,7 +58,8 @@ q_1 < ... < q_k of `improper_spinor_generators` (the smallest primes outside the
 primes, each kept when independent of those before it), is at position
 1 + sum e_i 2^(i-1) -- the labelling rule recorded in CLAUDE.md, which Hecke's
 construction order follows.  Unlike Magma's SpinorKernel, Hecke's spinor group takes
-the signature into account, so the count is right.
+the signature into account; the count is right once Hecke.jl PR #2611 is in, which
+hecke_fixes.jl applies at load time to Hecke versions without it.
 """
 function enumerate_indefinite(L::ZZLat)
     gens = Hecke.improper_spinor_generators(genus(L))

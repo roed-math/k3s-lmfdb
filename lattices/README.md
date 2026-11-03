@@ -204,6 +204,7 @@ tests/run.sh test_universality  # one suite, streaming its output
 python3 tests/test_schema_consistency.py
 python3 oscar/test_refine_universality.py
 julia --project=oscar oscar/test_fix_festi_veniani.jl
+julia --project=oscar oscar/test_hecke_fixes.jl
 ```
 
 CI (`.github/workflows/tests.yml`) runs one job per Magma suite once the
