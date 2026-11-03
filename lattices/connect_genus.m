@@ -1088,7 +1088,7 @@ two-pass connect in run_all.py).}
             lat["name"] := IsDefined(atomic_names, lat["label"]) select atomic_names[lat["label"]] else "\\N";
         end if;
 
-        for col in ["covering_norm_num", "covering_norm_den", "deep_holes", "deep_hole_count", "deep_hole_orbit_count", "hole_count"] do
+        for col in ["covering_norm_num", "covering_norm_den", "deep_holes", "deep_holes_den", "deep_hole_count", "deep_hole_orbit_count", "hole_count"] do
             lat[col] := "\\N"; // Overwritten below if possible
         end for;
         for col in ["shortest", "is_well_rounded", "is_minimal_vector_generated", "is_strongly_well_rounded", "is_eutactic", "is_strongly_eutactic", "t_design", "perfection_defect", "is_perfect", "is_strongly_perfect"] do
@@ -1107,7 +1107,15 @@ two-pass connect in run_all.py).}
             if have_aut then
                 success, vdat, elapsed := TimeoutCall(timeout, VoronoiData, <L, aut_group>, 6 : HardKill := true);
                 if success then
-                    lat["covering_norm_num"], lat["covering_norm_den"], lat["deep_holes"], lat["deep_hole_count"], lat["deep_hole_orbit_count"], lat["hole_count"] := Explode(vdat);
+                    lat["covering_norm_num"], lat["covering_norm_den"], holes, lat["deep_hole_count"], lat["deep_hole_orbit_count"], lat["hole_count"] := Explode(vdat);
+                    // The hole coordinates are rationals; store integer numerators over
+                    // one denominator per lattice (deep_holes_den), since Postgres'
+                    // numeric cannot hold fractions.  On every lattice checked (925, ranks
+                    // 1-5) the common denominator equals the largest single hole's
+                    // denominator and divides 2*det, so nothing grows.
+                    den := LCM([Integers() | 1] cat [Denominator(x) : x in Eltseq(v), v in holes]);
+                    lat["deep_holes"] := [[Integers() | den * x : x in Eltseq(v)] : v in holes];
+                    lat["deep_holes_den"] := den;
                     // We write the data to a file for loading in the decomposable case
                     SaveVdat(lat);
                 end if;

@@ -51,7 +51,8 @@ Label: `dimension.signature.determinant.genus_spec.tiebreaker` where
 | [center_density](https://beta.lmfdb.org/knowledge/show/lattice.density) | numeric | density of the lattice centered sphere packing (only for definite lattices) |
 | [covering_norm_num](https://beta.lmfdb.org/knowledge/show/lattice.covering_radius) | integer | numerator of the square of the covering radius, the minimum real number so that balls of this radius around lattice points cover space |
 | [covering_norm_den](https://beta.lmfdb.org/knowledge/show/lattice.covering_radius) | integer | denominator of the square of the covering radius |
-| deep_holes | numeric[] | orbit representatives, under the action of the automorphism group, for the deep holes (the holes at maximal distance from the lattice); coordinates are rational in general |
+| deep_holes | integer[] | orbit representatives, under the action of the automorphism group, for the deep holes (the holes at maximal distance from the lattice); stored as integer numerators: the coordinates of each hole are these divided by deep_holes_den |
+| deep_holes_den | integer | the common denominator of the coordinates in deep_holes (it divides twice the determinant) |
 | deep_hole_count | bigint | the number of deep holes |
 | deep_hole_orbit_count | bigint | the number of orbits of deep holes under the automorphism group |
 | hole_count | bigint | the number of holes (the vertices of the Voronoi cells of the lattice) |
