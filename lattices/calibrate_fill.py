@@ -151,6 +151,7 @@ def cmd_report(a):
            + "  t_med   t_p90   t_max   h_med  h_max  maxlat_p90  est_cpu_h")
     print(hdr)
     rank_tot = defaultdict(lambda: [0.0, 0, 0.0])   # (rank, definite) -> [cpu_h, pop, lost pop]
+    costs = []                                       # (rank, nminus, log2det, mean seconds)
     for st in sorted(by):
         recs = by[st]
         oc = Counter((r["outcome"] if r else "missing") for r in recs)
@@ -158,6 +159,8 @@ def cmd_report(a):
         hs = [int(r["class_number"]) for r in recs if r and r["class_number"] not in ("\\N", "")]
         ml = [float(r["max_lat_time"]) for r in recs if r]
         mean_t = statistics.mean(times) if times else float("nan")
+        if times:
+            costs.append((*st, mean_t))
         P = pop.get(st, 0)
         cpu_h = mean_t * P / 3600 if times else float("nan")
         lost = sum(oc[o] for o in OUTCOMES if o != "ok") / len(recs)
@@ -186,6 +189,12 @@ def cmd_report(a):
     print("_DEF_COST = {" + ", ".join("%d: %.1f" % (r, c) for r, c in sorted(def_cost.items())) + "}")
     if indef:
         print("indefinite: %.2f s per genus" % (sum(v[0] for v in indef) * 3600 / sum(v[1] for v in indef)))
+    if a.costs_out:
+        with open(a.costs_out, "w") as F:
+            F.write("# rank nminus log2det mean_seconds_per_genus (run_all.py --genus-costs)\n")
+            for r, nm, b, t in costs:
+                F.write("%d %d %d %.3f\n" % (r, nm, b, t))
+        print(f"\nwrote {len(costs)} stratum costs to {a.costs_out} (use with run_all.py --genus-costs)")
     missing = [l for l in sample if l not in stats]
     if missing:
         print(f"\n{len(missing)} sampled genera have no fill_stats record (crash, error, or not run): "
@@ -205,6 +214,7 @@ def main():
     s.add_argument("--force", action="store_true")
     r = sub.add_parser("report")
     r.add_argument("--tree", default=".")
+    r.add_argument("--costs-out", default="", help="write per-stratum mean seconds per genus for run_all.py --genus-costs")
     a = ap.parse_args()
     {"sample": cmd_sample, "report": cmd_report}[a.cmd](a)
 

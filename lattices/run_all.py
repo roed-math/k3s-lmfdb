@@ -23,7 +23,34 @@ def timed(label):
     print(f"=== {label} ...", flush=True)
     t0 = time.monotonic()
     yield
+    STAGE_TIMES.append((label, round(time.monotonic() - t0, 1)))
     print(f"=== {label}: done in {time.monotonic() - t0:.1f}s", flush=True)
+
+STAGE_TIMES = []
+RUN_ID = time.strftime("%Y%m%dT%H%M%S") + f"-{os.getpid()}"
+
+def provenance(event, **fields):
+    """Append a record to run_provenance.jsonl: which code, tools and options produced
+    the data in this directory.  Labels and several invariants depend on the Magma
+    version (CanonicalForm, patched intrinsics) and on the enumeration route, and a
+    run that pulls new code partway mixes versions, so record them per run."""
+    import json, socket
+    rec = {"run": RUN_ID, "event": event, "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    if event == "start":
+        def git(*a):
+            r = subprocess.run(["git", *a], capture_output=True, text=True)
+            return r.stdout.strip() if r.returncode == 0 else None
+        rec.update(host=socket.gethostname(), argv=sys.argv, commit=git("rev-parse", "HEAD"),
+                   dirty=bool(git("status", "--porcelain", "--untracked-files=no")),
+                   submodules=git("submodule", "status"), python=sys.version.split()[0])
+        try:
+            import sage.version
+            rec["sage"] = sage.version.version
+        except Exception:
+            pass
+    rec.update(fields)
+    with open("run_provenance.jsonl", "a") as F:
+        F.write(json.dumps(rec) + "\n")
 
 parser = argparse.ArgumentParser("run_all", description="Run the whole pipeline for generating lattice data")
 
@@ -38,6 +65,8 @@ parser.add_argument("-k", "--nokthree", action="store_true", help="By default, w
 parser.add_argument("-j", "--jobs", type=int, default=128, help="Number of parallel processes to use")
 parser.add_argument("-b", "--batch-mass", type=int, default=128, help="DEPRECATED, ignored.  Batches are now sized by estimated wall-clock work (--batch-work-target), not mass.  Mass is a terrible proxy for cost: high-rank genera have huge automorphism groups, so their mass is ~1e-6, and hundreds of expensive genera packed into one mass-bounded batch that then ran for tens of minutes.  Kept only so existing invocations don't error.")
 parser.add_argument("--batch-work-target", type=float, default=120.0, help="Batch genus-enumeration instances together until their estimated fill cost reaches this many seconds, so every batch is ~equal wall-clock regardless of rank/signature mix.  Costs come from a measured per-genus calibration (see genus_work): rank<=8 and all indefinite genera are seconds, while a single definite rank 9-12 genus costs minutes and so lands in a batch of its own.  This is the primary batching control.")
+parser.add_argument("--genus-costs", default="", help="TSV of measured per-genus fill costs (rank, nminus, log2det, seconds), as written by `calibrate_fill.py report --costs-out`.  Batching then uses the cost of each genus's stratum (or the nearest determinant stratum of its rank and signature) instead of the built-in C=256 per-rank table.")
+parser.add_argument("--retry-missing", action="store_true", help="Refill only the genera listed in fill_missing_<rank>.txt (left by an earlier run: errors and crashes), one per job, with this run's guards; also retries failed Oscar enumeration records.  Implies --skip-list-genera.")
 parser.add_argument("--batch-size", type=int, default=32, help="Backstop cap on genera per batch, regardless of work target.  Mainly bounds the per-job command-line length (one label each); for cheap genera the work target rarely fills a batch, so this keeps those batches from growing unwieldy.")
 
 # Don't store too many lattices
@@ -141,33 +170,65 @@ def genus_work(r, definite):
     # run.  Recalibrate against the actual census before trusting them there.
     return float(args.enum_timelimit)
 
+_GENUS_COSTS = None
+def measured_cost(r, nminus, det):
+    """Cost of a genus from --genus-costs: its (rank, nminus, log2 det) stratum, else
+    the nearest determinant stratum of the same rank and signature; None if neither."""
+    global _GENUS_COSTS
+    if not args.genus_costs:
+        return None
+    if _GENUS_COSTS is None:
+        _GENUS_COSTS = defaultdict(dict)      # (rank, nminus) -> {log2det: seconds}
+        with open(args.genus_costs) as F:
+            for line in F:
+                f = line.split()
+                if len(f) == 4 and f[0].isdigit():
+                    _GENUS_COSTS[(int(f[0]), int(f[1]))][int(f[2])] = float(f[3])
+    by_det = _GENUS_COSTS.get((r, nminus))
+    if not by_det:
+        return None
+    b = det.bit_length() - 1
+    return by_det[min(by_det, key=lambda k: (abs(k - b), k))]
+
 def build_enumeration_inputs(fname, rank=None):
-    W = 0.0
+    """Write fill batches (colon-joined labels, one batch per line) to fname.
+    Genera are packed until their estimated cost reaches --batch-work-target (or
+    --batch-size labels); a genus that alone reaches the target gets a batch of its
+    own, so it never holds up cheaper genera queued behind it.  Batches are written
+    most expensive first: GNU parallel starts them in file order, and a rank cannot
+    finish before its longest batch (on the C=32768 calibration, rank-8 batches of 11
+    serial genera ran for hours on 3 of 24 slots)."""
     T = args.batch_work_target
-    labels = []
-    total = 0
-    with open(fname, "w") as Fout:
-        for sig in signatures():
-            r = sum(sig)
-            if rank is not None and r != rank:
+    batches = []                    # (estimated seconds, labels)
+    for sig in signatures():
+        r = sum(sig)
+        if rank is not None and r != rank:
+            continue
+        nplus = sig[0]
+        base = Path("genera_basic", str(r), str(nplus))
+        if not base.is_dir():
+            continue            # no genera enumerated for this signature
+        definite = (r == nplus)
+        W, labels = 0.0, []
+        for genus in base.iterdir():
+            w = measured_cost(r, r - nplus, int(genus.name.split(".")[2]))
+            if w is None:
+                w = genus_work(r, definite)
+            if w >= T:
+                batches.append((w, [genus.name]))
                 continue
-            nplus = sig[0]
-            base = Path("genera_basic", str(r), str(nplus))
-            if not base.is_dir():
-                continue            # no genera enumerated for this signature
-            definite = (r == nplus)
-            for genus in base.iterdir():
-                W += genus_work(r, definite)
-                labels.append(genus.name)
-                if W >= T or len(labels) >= args.batch_size:
-                    _ = Fout.write(":".join(labels) + "\n")
-                    W = 0.0
-                    labels = []
-                    total += 1
+            W += w
+            labels.append(genus.name)
+            if W >= T or len(labels) >= args.batch_size:
+                batches.append((W, labels))
+                W, labels = 0.0, []
         if labels:
+            batches.append((W, labels))
+    batches.sort(key=lambda b: -b[0])
+    with open(fname, "w") as Fout:
+        for _, labels in batches:
             _ = Fout.write(":".join(labels) + "\n")
-            total += 1
-    return total
+    return len(batches)
 
 def build_tensor_inputs(fname):
     total = 0
@@ -349,7 +410,8 @@ def oscar_enumerate():
                         "--task", "enumerate", "--labels-file", "oscar_labels.txt",
                         "--jobs", str(args.oscar_jobs or args.jobs), "--timeout", str(args.oscar_timeout),
                         "--memlimit", str(args.oscar_memlimit), "--batch", str(args.oscar_batch),
-                        "--data-root", ".", "--out-root", "oscar_genus", "--ledger", "oscar_enum.ledger.tsv"],
+                        "--data-root", ".", "--out-root", "oscar_genus", "--ledger", "oscar_enum.ledger.tsv"]
+                       + (["--retry-failed"] if args.retry_missing else []),
                        env=julia_env())
 
 def check_oscar():
@@ -360,8 +422,12 @@ def check_oscar():
         # LMFDBLattices (oscar/LMFDBLattices) is precompiled with a workload the first
         # time it is loaded on a machine, ~5 min at low load; allow for that
         r = subprocess.run(["julia", "--project=oscar", "-e",
-                            "using LMFDBLattices, Oscar; @assert isdefined(Oscar, :_primitive_embeddings_in_unimodular_safe)"],
+                            "using LMFDBLattices, Oscar; @assert isdefined(Oscar, :_primitive_embeddings_in_unimodular_safe); "
+                            "println(\"OSCAR_VERSION \", Oscar.VERSION_NUMBER, \" julia \", VERSION)"],
                            capture_output=True, timeout=3600, env=julia_env())
+        v = [l for l in r.stdout.decode(errors="replace").splitlines() if l.startswith("OSCAR_VERSION")]
+        if v:
+            provenance("oscar", version=v[0].split(" ", 1)[1])
         if r.returncode != 0:
             tail = r.stderr.decode(errors="replace").strip().splitlines()[-3:]
             print("  oscar preflight failed: " + " | ".join(tail), flush=True)
@@ -471,6 +537,9 @@ def clean_outputs():
 
 
 def main():
+    if args.retry_missing:
+        args.skip_list_genera = True
+    provenance("start")
     if args.clean:
         clean_outputs()
     if args.skip_embeddings and Path("refine_sidecar").is_dir():
@@ -508,6 +577,7 @@ def main():
         # Require the success line: an error inside Magma can still exit 0.
         check = subprocess.run(["magma", "-b", "check_magma.m"], capture_output=True, text=True)
         print(check.stdout.strip(), flush=True)
+        provenance("magma", check_magma=check.stdout.strip().splitlines()[-1:] or None)
         if "MAGMA_OK" not in check.stdout and not args.allow_unpatched_magma:
             sys.exit("Stopping: patch Magma (magma_patches/) or pass --allow-unpatched-magma.")
         if not args.no_oscar_enum:
@@ -524,7 +594,15 @@ def main():
         # recursive chains.  Within a rank, batches run in parallel as before;
         # only the ranks are sequenced.
         for r in sorted(set(ranks()), reverse=True):
-            rcount = build_enumeration_inputs(f"genus_jobs_{r}.txt", rank=r)
+            if args.retry_missing:
+                missing = Path(f"fill_missing_{r}.txt")
+                if not missing.exists():
+                    continue
+                todo = [l for l in missing.read_text().split() if l]
+                Path(f"genus_jobs_{r}.txt").write_text("\n".join(todo) + "\n")   # one genus per job
+                rcount = len(todo)
+            else:
+                rcount = build_enumeration_inputs(f"genus_jobs_{r}.txt", rank=r)
             if rcount == 0:
                 continue
             with timed(f"Enumerating genera of rank {r} ({rcount} batches)"):
@@ -696,4 +774,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+        provenance("end", status="ok", stages=STAGE_TIMES)
+    except SystemExit as e:
+        provenance("end", status=f"exit {e.code}", stages=STAGE_TIMES)
+        raise
+    except BaseException as e:
+        provenance("end", status=f"{type(e).__name__}: {e}", stages=STAGE_TIMES)
+        raise

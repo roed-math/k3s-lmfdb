@@ -212,6 +212,18 @@ nothing can interrupt the batch process itself.  A child discards whatever Magma
 initialises lazily on first use, so `WarmLatticeCaches` (in
 [`fill_genus.m`](fill_genus.m)) initialises it once in the batch process.
 
+## Rerunning and provenance
+
+- `run_all.py --retry-missing` refills only the genera listed in
+  `fill_missing_<rank>.txt` (errors and crashes left by an earlier run), one per
+  job, with the guards given on its command line, and retries failed Oscar
+  enumeration records.
+- Every run appends to `run_provenance.jsonl` in `lattices/`: a `start` record
+  (commit, whether the tree was dirty, submodule pins, host, arguments, Sage),
+  `magma` and `oscar` records with the versions the checks found, and an `end`
+  record with each stage's wall-clock time and the exit status.  Keep it with the
+  data.
+
 ## Calibrating the fill stage
 
 The fill guards (`--enum-*`) and the batch weights (`genus_work` in
@@ -230,7 +242,9 @@ sage -python run_all.py --skip-list-genera --clean --fill-stats -j 32 \
     --skip-embeddings --skip-tensor --skip-names --skip-connect
 # 3. per-stratum outcomes, time quantiles, class numbers, slowest lattice, and
 #    census CPU-hours extrapolated from the stratum populations
-python3 calibrate_fill.py report > calibration_report.txt
+python3 calibrate_fill.py report --costs-out genus_costs.tsv > calibration_report.txt
+# 4. later runs batch by the measured costs (expensive genera alone, longest first)
+sage -python run_all.py ... --genus-costs genus_costs.tsv
 ```
 
 `--clean` here leaves the sampled `genera_basic/` alone (it is the input when
