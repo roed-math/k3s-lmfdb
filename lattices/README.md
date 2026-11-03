@@ -19,9 +19,18 @@ pipe-separated columns of the corresponding records.
    `12 <= rank <= 20`, `nminus in {1,2}`, disabled by `--nokthree`).  Writes
    `genera_basic/`, including the LMFDB label and one representative Gram
    matrix per genus.
-2. **Enumerate genera** (Magma, [`fill_genus.m`](fill_genus.m) via
+2. **Enumerate genera with Oscar** ([`oscar/pool.jl`](oscar/pool.jl) `--task
+   enumerate`, on a pool of persistent Oscar workers): indefinite genera of rank
+   >= 3 (Magma's spinor kernel overcounts some of them) and definite genera of rank
+   <= 8 (Oscar is faster there; Magma from rank 9).  Writes one record per genus to
+   `oscar_genus/`: the classes (indefinite ones in label order), with automorphism
+   group orders and root systems for definite genera.  `--no-oscar-enum` skips it;
+   `--oscar-jobs/-timeout/-memlimit/-batch`, `--oscar-definite-max-rank`,
+   `--oscar-indefinite-min-rank` control it.
+3. **Fill genera** (Magma, [`fill_genus.m`](fill_genus.m) via
    [`run_fill_genus.m`](run_fill_genus.m) under GNU parallel): compute all
-   classes in each genus — by default with the orbit-method enumeration of
+   classes in each genus — from the Oscar record when there is an `ok` one,
+   otherwise by default with the orbit-method enumeration of
    [`genus_reps.m`](genus_reps.m) (`--no-orth` falls back to the p-neighbour
    walk) — then per-lattice invariants (automorphism group, theta series,
    hashes, `is_universal`/`is_even_universal`, ...).  Writes
@@ -46,10 +55,10 @@ pipe-separated columns of the corresponding records.
    `julia --project=oscar oscar/fix_festi_veniani.jl --legacy .`, which first saves
    the image orders to `festi_veniani/`, so a rerun is harmless.  Keep
    `festi_veniani/` with the data.
-3. **Tensor products** (Magma, [`run_tensor.m`](run_tensor.m)).
-4. **Names** (Magma, [`run_basic_names.m`](run_basic_names.m)): atomic lattice
+4. **Tensor products** (Magma, [`run_tensor.m`](run_tensor.m)).
+5. **Names** (Magma, [`run_basic_names.m`](run_basic_names.m)): atomic lattice
    names, merged across workers.
-5. **Connect** (Magma, [`connect_genus.m`](connect_genus.m) via
+6. **Connect** (Magma, [`connect_genus.m`](connect_genus.m) via
    [`run_connect_genus.m`](run_connect_genus.m), two passes): everything that
    needs data across genera — duals, orthogonal decompositions, geometric
    invariants, names, and the universality/regularity columns (see below).
@@ -58,7 +67,7 @@ pipe-separated columns of the corresponding records.
    lookups in `indefinite_lookups/`, and
    [`oscar/resolve_indefinite.jl`](oscar/resolve_indefinite.jl) fills them in
    with Oscar afterwards.
-6. **Embeddings** (Julia/Oscar, [`oscar/driver.jl`](oscar/driver.jl) under GNU
+7. **Embeddings** (Julia/Oscar, [`oscar/driver.jl`](oscar/driver.jl) under GNU
    parallel; design in [`oscar/INTEGRATION_PLAN.md`](oscar/INTEGRATION_PLAN.md)):
    prime-index overlattices, corank-1 primitive embeddings (rank n → n+1) and
    primitive-embedding counts into the K3 lattice, from the fill outputs only —
@@ -73,7 +82,7 @@ pipe-separated columns of the corresponding records.
    `--clean` (e.g. `--skip-list-genera --skip-enumerate-genera`) computes only
    the jobs that did not finish.  Skipped with a warning if the
    Julia/Oscar environment is not set up.
-7. **Refine** (Python, [`oscar/refine_universality.py`](oscar/refine_universality.py),
+8. **Refine** (Python, [`oscar/refine_universality.py`](oscar/refine_universality.py),
    inline in `run_all.py`): a bottom-up bitset pass over the embedding poset —
    each rank-n lattice gets a distinct power of two, masks are OR-ed up the
    corank-1 and overlattice edges, and then all-ones tests db-relative
@@ -145,7 +154,7 @@ the genus-symbol enumeration, and the bundled PARI.  Install from
 
 `brew install parallel` (macOS) or your package manager.
 
-### Julia + Oscar (embedding stage)
+### Julia + Oscar (enumeration and embedding stages)
 
 Until Oscar 1.9 is released, the embedding code needs the development branch
 (the primitive-embedding refactor of
@@ -164,6 +173,17 @@ julia --project=. -e 'using Oscar;
 ```
 
 Workers should run with `JULIA_NUM_THREADS=1`; budget a few GB of RSS each.
+
+The pipeline's own Oscar code is the package [`oscar/LMFDBLattices`](oscar/LMFDBLattices)
+(already in the project).  Its precompile workload runs every task once on small
+lattices, so the compiled code is cached: the first definite `representatives`
+call in a fresh process went from 110 s of compilation to 0.9 s (mimir, load ~160).
+That precompilation happens the first time the package is loaded on a machine and
+after any change to it (~5 min at low load); `run_all.py`'s Oscar preflight
+triggers it.  The worker pool (`LMFDBLattices/src/pool.jl`, Distributed.jl) pays the
+remaining ~30 s load once per worker, kills and replaces a worker whose genus
+overruns `--timeout` or `--memlimit`, and resumes from existing records.  Test it
+with `julia --project=oscar oscar/test_pool.jl`.
 
 ## Tests
 
