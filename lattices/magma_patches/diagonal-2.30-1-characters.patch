@@ -1,0 +1,15 @@
+--- package/Lattice/Lat/diagonal.m
++++ package/Lattice/Lat/diagonal.m
+@@ -102,7 +102,11 @@
+    m := Abs(&*M);
+    if 2 in M and -1 notin M then 
+       M := [-1] cat M; 
+-      S := [ [1] cat s : s in S ];
++      // SpinorKernel's vectors put no condition on the new coordinate at -1, so it
++      // must stay free: add the vector that is -1 there and 1 elsewhere.  Without it
++      // the complement W below contains a spurious character, which doubles the
++      // number of spinor genera.
++      S := [ [1] cat s : s in S ] cat [ [-1] cat [ 1 : i in [1..#M-1] ] ];
+    end if;
+    if -1 in M then
+       m *:= 4;
