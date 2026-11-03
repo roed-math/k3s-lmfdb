@@ -23,30 +23,30 @@ V2.30-1; for other versions check that each hunk applies, and port by hand if no
   The orbit method and the p-neighbour walk stop on Magma's `Mass`, so a wrong mass
   breaks enumeration.  `check_magma.m` requires it (`MagmaMassPatched`).  Bug report:
   `mass-2.30-1-report.md`.
-- **The three `diagonal-2.30-1-*.patch` (spinor genera; all three together, not yet
-  required by `check_magma.m`).**  `package/Lattice/Lat/diagonal.m`; they apply in any
-  order.  Magma counts the classes of an indefinite genus of rank >= 3 as its spinor
-  genera via `SpinorCharacters`, which had three bugs:
-  - `diagonal-2.30-1-indefinite.patch`: `SpinorKernel` ignored the signature, treating
-    an indefinite form as definite at infinity; adds the idele that is -1 at infinity.
-  - `diagonal-2.30-1-characters.patch` (found by David, 2026-11-03): when
-    `SpinorCharacters` adds a coordinate at -1 (2 in M, -1 not), that coordinate must
-    stay free; adds the kernel vector [-1, 1, ..., 1].
-  - `diagonal-2.30-1-complement.patch`: the characters were an arbitrary complement
-    of the kernel's span (`Complement`), which has the right dimension but can contain
-    characters nontrivial on the kernel; uses the annihilator instead.  With the other
-    two patches but not this one, Magma's count was right but its character (and so
-    the spinor generator, and the pipeline's second class) was wrong in 13 genera.
+- **`diagonal-2.30-1.patch` (required).**  `package/Lattice/Lat/diagonal.m`: Magma counts
+  the classes of an indefinite genus of rank >= 3 as its (improper) spinor genera, through
+  `SpinorCharacters`, which had three bugs; `genus_reps_Spinor` builds the classes from
+  them.  The patch fixes all three:
+  1. `SpinorKernel` ignored the signature, treating an indefinite form as definite at
+     infinity; it now adds the idele that is -1 at infinity.
+  2. When `SpinorCharacters` adds a coordinate at -1 (2 in M, -1 not), that coordinate
+     must stay free: it adds the kernel vector [-1, 1, ..., 1] (found by David,
+     2026-11-03).
+  3. The characters were an arbitrary complement of the kernel's span (`Complement`),
+     which has the right dimension but can contain characters that are nontrivial on
+     the kernel; it now takes the annihilator.  With fixes 1 and 2 but not this one,
+     the count was right but the character, and so the spinor generator and the
+     pipeline's second class, was wrong in 13 genera.
   On 19162 census genera of ranks 3-5 with square factors in det, against stock Hecke
-  0.39.21, stock Magma disagrees on 99 class numbers, with the indefinite patch on 17,
-  with indefinite + characters on 13: exactly the 13 genera that Hecke.jl PR #2611 (a
-  Hecke bug in `_automorphous_numbers`) moves from 1 class to 2.  Against Hecke with
-  that PR, Magma with indefinite + characters agrees on all 19162 class numbers, but its
-  spinor characters differ in 13 of the 39 multi-class genera; with all three patches
-  they agree in all 39, at every prime < 200, and the pipeline's representatives of the
-  17 genera Magma and Hecke used to dispute are pairwise non-isometric (Hecke).  Without
-  the complement patch, in 3.2.10800.0001.11.01.293b and .493b the neighbour Magma picks
-  as the second class is explicitly isometric to the first.  The characters patch alone
-  changes only 4 genera (the det-10368 ones), and indefinite + complement without it
-  leaves those 4 wrong.  Evidence and scripts: `/scratch/claudeF/work/spinor_fix/` on
-  mimir.
+  0.39.21, stock Magma disagrees on 99 class numbers, with fix 1 on 17, with fixes 1-2
+  on 13: exactly the 13 genera that Hecke.jl PR #2611 (a Hecke bug in
+  `_automorphous_numbers`) moves from 1 class to 2.  Against Hecke with that PR, fixes
+  1-2 agree on all 19162 class numbers but the spinor characters differ in 13 of the 39
+  multi-class genera; with all three they agree in all 39, at every prime < 200, and
+  the pipeline's representatives of the 17 genera Magma and Hecke used to dispute are
+  pairwise non-isometric (Hecke).  Without fix 3, in 3.2.10800.0001.11.01.293b and .493b
+  the neighbour Magma picks as the second class is explicitly isometric to the first.
+  Fix 2 alone changes only 4 genera (the det-10368 ones), and fixes 1 and 3 without it
+  leave those 4 wrong.  `check_magma.m` requires the patch (`MagmaSpinorPatched`, one
+  example per bug).  Evidence and scripts: `/scratch/claudeF/work/spinor_fix/` on mimir.
+  Bug report: `diagonal-2.30-1-report.md`.

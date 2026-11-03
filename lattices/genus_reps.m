@@ -164,6 +164,28 @@ mass-verified enumerations here stop on Magma's Mass.}
     return true, "";
 end intrinsic;
 
+intrinsic MagmaSpinorPatched() -> BoolElt, MonStgElt
+{Whether this Magma's spinor characters are right on indefinite lattices of rank >= 3,
+i.e. carries magma_patches/diagonal-2.30-1.patch, and if not, a description of the first
+failure.  Each case is an indefinite ternary L with a q-neighbour isometric to L (so q is
+improperly automorphous and every spinor character is 1 at q), on which one of the three
+bugs fixed by the patch shows; the expected numbers of characters agree with Hecke
+(with Hecke.jl PR #2611) and with GenusRepresentatives.}
+    // <Gram matrix, q, number of spinor characters>: bug 1 (SpinorKernel ignored the
+    // signature), bug 2 (SpinorCharacters did not free the coordinate it adds at -1),
+    // bug 3 (SpinorCharacters took a complement of the kernel, not its annihilator).
+    for t in [<[4,1,0, 1,10,0, 0,0,-54], 5, 0>, <[-9,0,0, 0,18,0, 0,0,64], 7, 1>,
+              <[1,0,0, 0,-48,24, 0,24,213], 11, 1>] do
+        L := LatticeWithGram(Matrix(Integers(), 3, 3, t[1]) : CheckPositive := false);
+        X := SpinorCharacters(Genus(L) : Proper := false);
+        if #X ne t[3] or exists{x : x in X | Evaluate(x, t[2]) ne 1} then
+            return false, Sprintf("SpinorCharacters of the genus of %o: %o characters with values %o at %o, expected %o characters, all 1 there",
+                                  t[1], #X, [Evaluate(x, t[2]) : x in X], t[2], t[3]);
+        end if;
+    end for;
+    return true, "";
+end intrinsic;
+
 function genus_reps_Logan(L)
     // neighbours was renamed neighbours_old when list_genus took over; keep the
     // wrapper pointing at the surviving implementation.

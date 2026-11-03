@@ -1,0 +1,54 @@
+--- package/Lattice/Lat/diagonal.m
++++ package/Lattice/Lat/diagonal.m
+@@ -102,7 +102,11 @@
+    m := Abs(&*M);
+    if 2 in M and -1 notin M then 
+       M := [-1] cat M; 
+-      S := [ [1] cat s : s in S ];
++      // SpinorKernel's vectors put no condition on the new coordinate at -1, so it
++      // must stay free: add the vector that is -1 there and 1 elsewhere.  Without it
++      // the complement W below contains a spurious character, which doubles the
++      // number of spinor genera.
++      S := [ [1] cat s : s in S ] cat [ [-1] cat [ 1 : i in [1..#M-1] ] ];
+    end if;
+    if -1 in M then
+       m *:= 4;
+@@ -110,7 +114,12 @@
+    X := DirichletGroup(m,Integers());
+    V := VectorSpace(GF(2),Ngens(X));
+    B := [ V | [ (1-s[i]) div 2 : i in [1..#s] ] : s in S ];
+-   W := Complement(V,sub< V | B >);
++   // The spinor characters are the products of coordinate characters that are
++   // trivial on the kernel: exponent vectors orthogonal to every vector of B.  That
++   // is the annihilator of B; an arbitrary complement of its span has the right
++   // dimension (so the number of spinor genera came out right) but can contain
++   // characters that are nontrivial on the kernel.
++   W := #B eq 0 select V else Nullspace(Transpose(Matrix(GF(2), #B, Ngens(X), [ Eltseq(b) : b in B ])));
+    chars := [ X | ];
+    for e in Basis(W) do
+       x := X!1;
+@@ -232,6 +241,24 @@
+       end if; 
+    end for;
+ 
++   // For an indefinite form the real place has every spinor norm, so the idele
++   // that is -1 at infinity is automorphous; in these coordinates it is the vector
++   // of character values at -1.  Without it an indefinite genus was treated as
++   // definite at infinity and its number of spinor genera came out twice as large
++   // whenever the -1 character survived.
++   G := GramMatrix(L);
++   if not IsPositiveDefinite(G) and not IsPositiveDefinite(-G) then
++      g := [ q eq -1 select -1 else KroneckerSymbol(-1, q) : q in chars ];
++      I := [ k : k in [1..#chars] | g[k] eq -1 ];
++      if #I eq 1 then
++         k := I[1];
++         Remove(~chars,k);
++         gens := { Remove(h,k) : h in gens };
++      elif #I ge 2 then
++         Include(~gens,g);
++      end if;
++   end if;
++
+    // Any reflection acts on the proper spinor genera.
+    // The orbits are the full spinor genera.
+    // We simply compute such a reflection v of norm coprime to 2*det(L).
