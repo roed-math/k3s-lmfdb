@@ -56,3 +56,5 @@ label_lookups
 label_lookups_done
 lookup_labels.txt
 label_lookups.ledger.tsv
+embed_pool
+embed.ledger.tsv

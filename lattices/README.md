@@ -71,14 +71,17 @@ pipe-separated columns of the corresponding records.
    `primitive_scaling`, `even_sublattice`, `norm1_complement` and
    `root_complement`; lookups for orthogonal factors and from tensor/names stay
    null.
-7. **Embeddings** (Julia/Oscar, [`oscar/driver.jl`](oscar/driver.jl) under GNU
-   parallel; design in [`oscar/INTEGRATION_PLAN.md`](oscar/INTEGRATION_PLAN.md)):
+7. **Embeddings** (Julia/Oscar, the Oscar worker pool's `embed` task,
+   [`oscar/LMFDBLattices/src/embed.jl`](oscar/LMFDBLattices/src/embed.jl);
+   [`oscar/driver.jl`](oscar/driver.jl) runs one job by hand; design in
+   [`oscar/INTEGRATION_PLAN.md`](oscar/INTEGRATION_PLAN.md)):
    prime-index overlattices, corank-1 primitive embeddings (rank n → n+1) and
    primitive-embedding counts into the K3 lattice, from the fill outputs only —
    no database connection.  Writes raw data under `inclusions/` and assembles
    `lat_inclusions.tbl` via [`oscar/write_table.jl`](oscar/write_table.jl).
    Runs last (it is the slowest optional stage); controlled by the `--embed-*`
-   flags (task list, det cap, class-number cap, worker count, per-job timeout —
+   flags (task list, det cap, class-number cap, worker count, per-job timeout
+   and memory cap —
    the corank-1 task is quadratic in the number of genera per rank, so start
    with a small `--embed-max-disc-ratio`).  Each task's domain genera are split
    into det-sorted chunks of `--embed-chunk`, one job each; a finished job is

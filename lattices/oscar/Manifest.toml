@@ -409,7 +409,7 @@ uuid = "1d63c593-3942-5779-bab2-d838dc0a180e"
 version = "22.1.7+0"
 
 [[deps.LMFDBLattices]]
-deps = ["Distributed", "Oscar", "PrecompileTools"]
+deps = ["Distributed", "Oscar", "PrecompileTools", "SHA"]
 path = "LMFDBLattices"
 uuid = "c37f56a1-3b12-4648-b446-e8484bc07ad7"
 version = "0.1.0"

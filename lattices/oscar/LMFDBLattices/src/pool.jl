@@ -35,11 +35,15 @@ function write_record(path::AbstractString, text::AbstractString)
 end
 
 # Labels "selftest.<kind>.<n>" exercise the pool itself (oscar/test_pool.jl): sleep
-# n seconds, allocate n GB and hold it, or throw.
+# n seconds (yielding, or in C without yielding), allocate n GB and hold it, or throw.
 function selftest_task(label::AbstractString, root::AbstractString)
     _, kind, n = split(label, ".")
     if kind == "sleep"
         sleep(parse(Float64, n))
+    elseif kind == "csleep"
+        # blocks in C without yielding, like a long Oscar/GAP call: the worker cannot
+        # answer the master until it returns
+        ccall(:sleep, Cuint, (Cuint,), parse(Int, n))
     elseif kind == "alloc"
         x = ones(UInt8, round(Int, parse(Float64, n) * 2^30))
         sleep(30)
@@ -50,7 +54,7 @@ function selftest_task(label::AbstractString, root::AbstractString)
     return "status=ok seconds=0\n"
 end
 
-const TASKS = Dict{String, Function}("enumerate" => enumerate_task, "resolve" => resolve_task,
+const TASKS = Dict{String, Function}("enumerate" => enumerate_task, "resolve" => resolve_task, "embed" => embed_task,
                                      "selftest" => selftest_task)
 
 """
@@ -92,10 +96,22 @@ mutable struct PoolWorker
     pid::Int
 end
 
+logp(msg...) = (println(stdout, "pool: ", msg...); flush(stdout))
+
 function start_worker(exeflags)
-    w = only(addprocs(1; exeflags = exeflags))
-    remotecall_eval(Main, [w], :(using LMFDBLattices))
-    return PoolWorker(w, remotecall_fetch(getpid, w))
+    # A worker that has not reported back within JULIA_WORKER_TIMEOUT (default 60 s)
+    # makes addprocs throw; under load ~200 workers took ~100 s to start.
+    haskey(ENV, "JULIA_WORKER_TIMEOUT") || (ENV["JULIA_WORKER_TIMEOUT"] = "900")
+    for attempt in 1:3
+        try
+            w = only(addprocs(1; exeflags = exeflags))
+            remotecall_eval(Main, [w], :(using LMFDBLattices))
+            return PoolWorker(w, remotecall_fetch(getpid, w))
+        catch e
+            logp("starting a worker failed (attempt $attempt): ", sprint(showerror, e))
+            attempt == 3 && rethrow()
+        end
+    end
 end
 
 function kill_worker(pw::PoolWorker)
@@ -121,7 +137,7 @@ function run_pool(task::String, labels::Vector{String}; root::String = ".", out_
         s = record_status(out_path(out_root, l))
         (s === nothing || (retry_failed && s != "ok")) && push!(todo, l)
     end
-    println("pool: $(length(labels)) labels, $(length(labels) - length(todo)) already done, $(length(todo)) to run on $jobs workers")
+    logp("$(length(labels)) labels, $(length(labels) - length(todo)) already done, $(length(todo)) to run on $jobs workers")
     isempty(todo) && return summarize(labels, out_root)
     queue = Channel{Vector{String}}(Inf)
     for k in 1:batch:length(todo)
@@ -138,14 +154,38 @@ function run_pool(task::String, labels::Vector{String}; root::String = ".", out_
     t_start = time()
     starting = [@async start_worker(exeflags) for _ in 1:jobs]
     pws = fetch.(starting)
-    println("pool: $(length(pws)) workers up after $(round(time() - t_start; digits = 1)) s")
+    logp("$(length(pws)) workers up after $(round(time() - t_start; digits = 1)) s")
     function drive(pw::PoolWorker)
         while pending[] > 0
             b = try take!(queue) catch; break end
-            fut = remotecall(run_batch, pw.id, task, b, root, out_root)
+            try
+                drive_batch(pw, b)
+            catch e
+                # Anything unexpected here must not kill this worker's loop silently:
+                # its batch would never be counted and the pool would wait forever.
+                logp("worker $(pw.id) failed on a batch of $(length(b)): ", sprint(showerror, e, catch_backtrace()))
+                kill_worker(pw)
+                for l in b
+                    record_status(out_path(out_root, l)) === nothing &&
+                        write_record(out_path(out_root, l), failure_record("crashed", 0.0; message = "pool error"))
+                end
+                lock(lk) do; pending[] -= length(b); end
+                newpw = start_worker(exeflags)
+                pw.id, pw.pid = newpw.id, newpw.pid
+            end
+            pending[] <= 0 && close(queue)
+        end
+    end
+    function drive_batch(pw::PoolWorker, b::Vector{String})
+            # remotecall_fetch in a local task, polled with istaskdone: isready on a
+            # remotecall Future asks the worker, and a worker inside a long Oscar/GAP
+            # call does not answer until it returns -- so the timeout check never ran.
+            # (the task returns an exception rather than throwing it: after a kill its
+            # fetch fails, and nobody waits on it any more)
+            fut = @async try remotecall_fetch(run_batch, pw.id, task, b, root, out_root) catch e; e end
             k, t_label, t0 = 1, time(), time()
             outcome = "ok"
-            while !isready(fut)
+            while !istaskdone(fut)
                 sleep(0.5)
                 while k <= length(b) && record_status(out_path(out_root, b[k])) !== nothing
                     k += 1; t_label = time()
@@ -158,8 +198,10 @@ function run_pool(task::String, labels::Vector{String}; root::String = ".", out_
                 outcome == "ok" || break
             end
             if outcome == "ok"
-                try fetch(fut) catch e
-                    outcome = e isa ProcessExitedException || (e isa RemoteException && e.captured.ex isa ProcessExitedException) ? "crashed" : "error"
+                e = fetch(fut)
+                if e isa Exception
+                    outcome = e isa ProcessExitedException || e isa EOFError ||
+                              (e isa RemoteException && e.captured.ex isa ProcessExitedException) ? "crashed" : "error"
                 end
             end
             while k <= length(b) && record_status(out_path(out_root, b[k])) !== nothing
@@ -179,22 +221,22 @@ function run_pool(task::String, labels::Vector{String}; root::String = ".", out_
                 rest = b[k + 1:end]
                 isempty(rest) || put!(queue, rest)
                 lock(lk) do; pending[] -= length(b) - length(rest); end
+                logp("worker $(pw.id): $(stuck) $(outcome) after $(round(time() - t_label; digits = 1)) s")
                 if outcome != "error"
                     newpw = start_worker(exeflags)
                     pw.id, pw.pid = newpw.id, newpw.pid
                 end
             end
             log_line(pw.id, length(b), done, round(time() - t0; digits = 2), outcome)
-            pending[] <= 0 && close(queue)
-        end
     end
     @sync for pw in pws
         @async drive(pw)
     end
     for pw in pws
-        try rmprocs(pw.id) catch end
+        try rmprocs(pw.id; waitfor = 30) catch end
+        kill_worker(pw)                       # rmprocs does not stop a busy worker
     end
-    println("pool: finished in $(round(time() - t_start; digits = 1)) s")
+    logp("finished in $(round(time() - t_start; digits = 1)) s")
     return summarize(labels, out_root)
 end
 
@@ -204,7 +246,7 @@ function summarize(labels, out_root)
         s = something(record_status(out_path(out_root, l)), "missing")
         counts[s] = get(counts, s, 0) + 1
     end
-    println("pool: ", join(["$k=$v" for (k, v) in sort(collect(counts))], " "))
+    logp(join(["$k=$v" for (k, v) in sort(collect(counts))], " "))
     return counts
 end
 

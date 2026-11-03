@@ -81,12 +81,13 @@ parser.add_argument("--warm-limit", type=int, default=0, help="Wall-clock budget
 
 # Embedding stage (Julia/Oscar; see oscar/INTEGRATION_PLAN.md and the README for setup)
 parser.add_argument("--embed-tasks", default="overlat,corank1,k3", help="Comma list of embedding computations: overlat (prime-index overlattices), corank1 (rank n -> n+1 primitive embeddings), k3 (primitive-embedding counts into the K3 lattice)")
-parser.add_argument("--embed-jobs", type=int, default=8, help="Parallel Julia workers for the embedding stage.  Separate from -j: each worker loads Oscar (~30s startup, a few GB of memory)")
+parser.add_argument("--embed-jobs", type=int, default=8, help="Oscar workers for the embedding stage (a pool, oscar/pool.jl --task embed).  Separate from -j: each worker loads Oscar once (~30 s, more under load) and needs a few GB of memory")
 parser.add_argument("--embed-classlimit", type=int, default=200, help="Skip genera with class number above this in the embedding stage (its cost grows with the class lists on both sides)")
 parser.add_argument("--embed-max-disc-ratio", type=int, default=0, help="Determinant cap C for the embedding stage, in the enumeration convention (rank n up to C/n); 0 = same as --max-disc-ratio")
 parser.add_argument("--embed-k3-min-rank", type=int, default=12, help="Lowest rank for the k3 task: the orthogonal complement inside the rank-22 K3 lattice has rank 22-n, and Oscar's embedding machinery has to enumerate its genus, which explodes as n decreases")
 parser.add_argument("--embed-chunk", type=int, default=200, help="Domain genera per embedding job.  Each task's domain genera are det-sorted and split into chunks of this size, one GNU parallel job each, so a timeout or OOM loses one chunk (and caps the completeness certificate just below that chunk's smallest det) instead of a whole rank or rank pair.  Finished chunks are committed atomically and skipped on a rerun without --clean.  Each job pays a fixed cost -- Julia/Oscar startup and compilation, plus loading its codomain or overlattice pool -- measured at ~270s per job on a loaded 32-core machine (94 chunks of 25 at R=4, D=120 cost 3.8x the 7 unchunked jobs in total job time), so keep chunks at well over that much work.")
-parser.add_argument("--embed-timelimit", type=int, default=3600, help="Wall-clock seconds per embedding job (enforced by GNU parallel --timeout; a killed job loses only its own task)")
+parser.add_argument("--embed-memlimit", type=float, default=16, help="Memory cap in GB per Oscar worker in the embedding stage; a job over it has its worker killed and replaced and its chunk stays uncommitted.")
+parser.add_argument("--embed-timelimit", type=int, default=3600, help="Wall-clock seconds per embedding job; the Oscar pool kills and replaces a worker whose job overruns it, and only that chunk stays uncommitted")
 
 # Skip stages
 parser.add_argument("--memlimit", type=int, default=32, help="Memory cap in GB for each Magma process in the fill and connect stages (SetMemoryLimit; 0 = none).  A job can hold two processes at once (the batch and a TimeoutCall child), so budget ~2x this per -j slot.  A child over the cap dies and that computation counts as failed; a batch process over it ends, and run_fill_genus.sh reports its unfinished genera.  Without a cap, rank-17 genera on the C=32768 census ran Magma processes up to 220 GB.")
@@ -346,6 +347,9 @@ def build_embedding_inputs(fname):
     jobtag = lambda task, p: f"{task}_{p.stem}"
     (labels_dir / "expected_jobs.txt").write_text(
         "".join(f"{jobtag(t, p)}\t{m}\n" for t, p, _, m in jobs))
+    # every job's inputs, for the pool's embed task (LMFDBLattices/src/embed.jl)
+    (labels_dir / "jobs.tsv").write_text(
+        "".join(f"{jobtag(t, p)}\t{t}\t{p}\t{p2}\n" for t, p, p2, _ in jobs))
     # Resume: the driver commits each finished job atomically to
     # inclusions/data/<jobtag>/ with the sha1 of its inputs in the manifest.  Keep
     # those, drop committed jobs this run does not expect (a different chunking or
@@ -367,12 +371,11 @@ def build_embedding_inputs(fname):
             if man.is_file() and f"inputs={digest}" in man.read_text().split("\n")[0].split():
                 done += 1
                 continue
-            Fout.write(f"{t}:{p}:{p2}\n")
+            Fout.write(jobtag(t, p) + "\n")
             total += 1
     if done:
         print(f"  {done} embedding jobs already committed with the same inputs; skipping them", flush=True)
     return total, len(jobs)
-    return total
 
 def julia_env():
     """A minimal environment for Julia subprocesses.  Running under `sage -python`,
@@ -518,7 +521,7 @@ def clean_outputs():
     targets = ["genera_advanced", "genera_hash", "lattice_basic_data",
                "lattice_advanced_data", "lattice_hashes", "voronoi", "shortest",
                "orth_cache", "fill_stats", "connect_stats", "oscar_genus",   # stale cached genera would leak old counters/labels into provenance
-               "inclusions", "embed_labels", "refine_sidecar", "label_lookups", "label_lookups_done",
+               "inclusions", "embed_labels", "embed_pool", "refine_sidecar", "label_lookups", "label_lookups_done",
                "festi_veniani", "festi_veniani_jobs"]
     if not args.skip_list_genera:
         targets.append("genera_basic")   # regenerated below; otherwise it is this run's input
@@ -644,12 +647,20 @@ def main():
             print("WARNING: Julia/Oscar environment not ready (setup: lattices/README.md); skipping embeddings", flush=True)
         else:
             if ecount > 0:
+                # On the Oscar worker pool: each worker loads Oscar once and the
+                # package's precompiled embedding code, instead of ~270 s of startup
+                # and compilation per job (GNU parallel launching oscar/driver.jl).
+                # A job over --embed-timelimit or --embed-memlimit has its worker
+                # killed and replaced; its chunk stays uncommitted (see below).
+                if Path("embed_pool").is_dir():
+                    shutil.rmtree("embed_pool")
                 with timed(f"Computing embeddings ({ecount} of {etotal} jobs)"):
-                    parallel("embed_jobs.txt", "embed.joblog",
-                             ["--task", "{1}", "--labels-file", "{2}", "--labels-file2", "{3}",
-                              "--data-root", ".", "--out-root", "inclusions"],
-                             colsep=":", prog=["julia", "--project=oscar", "oscar/driver.jl"],
-                             jobs=args.embed_jobs, timeout=args.embed_timelimit, env=julia_env())
+                    subprocess.run(["julia", "--project=oscar", "--startup-file=no", "oscar/pool.jl",
+                                    "--task", "embed", "--labels-file", "embed_jobs.txt",
+                                    "--jobs", str(args.embed_jobs), "--timeout", str(args.embed_timelimit),
+                                    "--memlimit", str(args.embed_memlimit), "--batch", "1",
+                                    "--data-root", ".", "--out-root", "embed_pool",
+                                    "--ledger", "embed.ledger.tsv"], env=julia_env())
             unfinished = [line.split("\t")[0] for line in
                           Path("embed_labels", "expected_jobs.txt").read_text().splitlines()
                           if line and not Path("inclusions", "data", line.split("\t")[0], "manifest.txt").is_file()]
