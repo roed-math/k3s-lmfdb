@@ -56,6 +56,9 @@ warmlimit := StringToInteger(warmlimit);
 
 // stats:=1 writes a per-genus fill_stats/ record (outcome, class number, timings);
 // see FillGenus and calibrate_fill.py.
+// oscar:=DIR: where oscar/pool.jl --task enumerate left its records (default
+// oscar_genus); a genus with an ok record takes its classes from it.
+if not assigned oscar then oscar := "oscar_genus"; end if;
 if not assigned stats then stats := "0"; end if;
 stats := StringToInteger(stats) ne 0;
 
@@ -116,7 +119,7 @@ failed := [];
 for l in label_list do
     if done then printf "START: %o\n", l; end if;
     try
-        FillGenus(l : timeout := timeout, masslimit := masslimit, sizelimit := sizelimit, timelimit := timelimit, adjlimit := adjlimit, perlattice := perlattice, use_orth := useorth, force_orth := forceorth, stats := stats);
+        FillGenus(l : timeout := timeout, masslimit := masslimit, sizelimit := sizelimit, timelimit := timelimit, adjlimit := adjlimit, perlattice := perlattice, use_orth := useorth, force_orth := forceorth, stats := stats, oscar := oscar);
         if done then printf "DONE: %o\n", l; end if;
     catch e
         printf "ERROR: %o: %o\n", l, e;

@@ -48,3 +48,6 @@ bench_cases*.tsv
 festi_veniani
 festi_veniani_jobs
 festi_veniani_jobs.txt
+oscar_genus
+oscar_labels.txt
+oscar_enum.ledger.tsv

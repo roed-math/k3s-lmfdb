@@ -63,6 +63,13 @@ parser.add_argument("--embed-timelimit", type=int, default=3600, help="Wall-cloc
 parser.add_argument("--memlimit", type=int, default=32, help="Memory cap in GB for each Magma process in the fill and connect stages (SetMemoryLimit; 0 = none).  A job can hold two processes at once (the batch and a TimeoutCall child), so budget ~2x this per -j slot.  A child over the cap dies and that computation counts as failed; a batch process over it ends, and run_fill_genus.sh reports its unfinished genera.  Without a cap, rank-17 genera on the C=32768 census ran Magma processes up to 220 GB.")
 parser.add_argument("--fill-stats", action="store_true", help="Have FillGenus write one fill_stats/<rank>/<nplus>/<label> record per genus (fields in fill_stats.format): the outcome -- ok, or which guard decided it (mass_skip, enum_fail, size_skip, time_discard) -- the class number, per-phase wall-clock and the slowest single lattice.  Off by default (it is another file per genus); calibrate_fill.py turns it on.")
 parser.add_argument("--skip-list-genera", action="store_true", help="Assume that genera have already been listed")
+parser.add_argument("--no-oscar-enum", action="store_true", help="Enumerate every genus with Magma.  By default the genera Oscar handles better -- indefinite of rank >= --oscar-indefinite-min-rank (Magma's spinor kernel overcounts some of them) and definite of rank <= --oscar-definite-max-rank (Oscar is faster there) -- are enumerated first by a pool of Oscar workers (oscar/pool.jl --task enumerate, records in oscar_genus/), and fill takes their classes from those records.")
+parser.add_argument("--oscar-jobs", type=int, default=0, help="Oscar workers for the enumeration pool (0 = -j).  Each loads Oscar once (~30 s, more under load) and then serves many genera.")
+parser.add_argument("--oscar-timeout", type=int, default=600, help="Seconds per genus in the Oscar enumeration pool; a genus that overruns has its worker killed and replaced and gets a 'timeout' record.  A definite genus whose Oscar enumeration failed is enumerated by Magma in fill; an indefinite one of rank >= 3 is not (its Magma class number may be wrong) and gets no class number.")
+parser.add_argument("--oscar-memlimit", type=float, default=16, help="Memory cap in GB per Oscar worker process; a worker over it is killed and replaced, and its genus gets a 'memory' record.")
+parser.add_argument("--oscar-batch", type=int, default=20, help="Genera per remote call in the Oscar pool.  Batching keeps cheap genera from making the master a bottleneck; a genus that fails is charged alone and the rest of its batch is requeued.")
+parser.add_argument("--oscar-definite-max-rank", type=int, default=8, help="Highest rank of definite genera enumerated with Oscar (the Magma/Oscar benchmark: Oscar faster up to rank 8, Magma from rank 9).")
+parser.add_argument("--oscar-indefinite-min-rank", type=int, default=3, help="Lowest rank of indefinite genera enumerated with Oscar.  Rank 2 stays with (patched) Magma.")
 parser.add_argument("--allow-unpatched-magma", action="store_true", help="Fill even if Magma fails check_magma.m.  Unpatched Magma gets indefinite binary genera wrong (classes outside the genus, missing classes); the census must not be run with it.  See magma_patches/.")
 parser.add_argument("--skip-enumerate-genera", action="store_true", help="Skip the fill stage (genus enumeration).  This does NOT imply --skip-list-genera: listing still runs unless that is also given, which is how the census listing was run (listing only, with --skip-embeddings).")
 parser.add_argument("--skip-embeddings", action="store_true", help="Do not compute primitive and K3 embedding data")
@@ -315,14 +322,46 @@ def julia_env():
     env.update({k: v for k, v in os.environ.items() if k.startswith("JULIA_")})
     return env
 
+def oscar_enumerate():
+    """Enumerate the genera Oscar handles better (see --no-oscar-enum) on a pool of
+    Oscar workers, before fill.  Records land in oscar_genus/; FillGenus reads them.
+    Already finished records are kept (rerun without --clean resumes)."""
+    labels = []
+    for sig in signatures():
+        r, nplus = sum(sig), sig[0]
+        definite = (r == nplus)
+        if (definite and r > args.oscar_definite_max_rank) or (not definite and r < args.oscar_indefinite_min_rank):
+            continue
+        base = Path("genera_basic", str(r), str(nplus))
+        if base.is_dir():
+            labels.extend(g.name for g in base.iterdir())
+    if not labels:
+        return
+    Path("oscar_labels.txt").write_text("\n".join(labels) + "\n")
+    if not check_oscar():
+        indefinite = sum(1 for l in labels if l.split(".")[0] != l.split(".")[1])
+        print(f"WARNING: Julia/Oscar environment not ready; Magma will enumerate all {len(labels)} "
+              f"genera meant for Oscar, including {indefinite} indefinite ones of rank >= "
+              f"{args.oscar_indefinite_min_rank}, where its spinor kernel can overcount classes", flush=True)
+        return
+    with timed(f"Enumerating {len(labels)} genera with Oscar"):
+        subprocess.run(["julia", "--project=oscar", "--startup-file=no", "oscar/pool.jl",
+                        "--task", "enumerate", "--labels-file", "oscar_labels.txt",
+                        "--jobs", str(args.oscar_jobs or args.jobs), "--timeout", str(args.oscar_timeout),
+                        "--memlimit", str(args.oscar_memlimit), "--batch", str(args.oscar_batch),
+                        "--data-root", ".", "--out-root", "oscar_genus", "--ledger", "oscar_enum.ledger.tsv"],
+                       env=julia_env())
+
 def check_oscar():
     """The embedding stage needs the pinned dev-Oscar project under oscar/ (see the
     README); a broken or missing environment skips the stage rather than failing it,
     and prints why so the skip is diagnosable."""
     try:
+        # LMFDBLattices (oscar/LMFDBLattices) is precompiled with a workload the first
+        # time it is loaded on a machine, ~5 min at low load; allow for that
         r = subprocess.run(["julia", "--project=oscar", "-e",
-                            "using Oscar; @assert isdefined(Oscar, :_primitive_embeddings_in_unimodular_safe)"],
-                           capture_output=True, timeout=600, env=julia_env())
+                            "using LMFDBLattices, Oscar; @assert isdefined(Oscar, :_primitive_embeddings_in_unimodular_safe)"],
+                           capture_output=True, timeout=3600, env=julia_env())
         if r.returncode != 0:
             tail = r.stderr.decode(errors="replace").strip().splitlines()[-3:]
             print("  oscar preflight failed: " + " | ".join(tail), flush=True)
@@ -331,7 +370,7 @@ def check_oscar():
         print("  oscar preflight failed: no `julia` on PATH", flush=True)
         return False
     except subprocess.TimeoutExpired:
-        print("  oscar preflight failed: `using Oscar` exceeded 600s (not precompiled?)", flush=True)
+        print("  oscar preflight failed: loading LMFDBLattices exceeded 3600s", flush=True)
         return False
 
 def parallel(jobfile, joblog, prog_args, colsep=None, prog=None, jobs=None, timeout=None, env=None):
@@ -411,7 +450,7 @@ def clean_outputs():
     """
     targets = ["genera_advanced", "genera_hash", "lattice_basic_data",
                "lattice_advanced_data", "lattice_hashes", "voronoi", "shortest",
-               "orth_cache", "fill_stats",   # stale cached genera would leak old counters/labels into provenance
+               "orth_cache", "fill_stats", "oscar_genus",   # stale cached genera would leak old counters/labels into provenance
                "inclusions", "embed_labels", "refine_sidecar", "indefinite_lookups",
                "festi_veniani", "festi_veniani_jobs"]
     if not args.skip_list_genera:
@@ -423,7 +462,8 @@ def clean_outputs():
             removed.append(f"{t} ({sum(1 for q in p.rglob('*') if q.is_file())} files)")
             shutil.rmtree(p)
     for f in ([Path("atomic_names"), Path("lat_inclusions.tbl")] + sorted(Path(".").glob("atomic_names_partial_*"))
-              + sorted(Path(".").glob("fill_missing_*.txt"))):
+              + sorted(Path(".").glob("fill_missing_*.txt"))
+              + [Path("oscar_labels.txt"), Path("oscar_enum.ledger.tsv")]):
         if f.exists():
             f.unlink()
             removed.append(f.name)
@@ -470,6 +510,8 @@ def main():
         print(check.stdout.strip(), flush=True)
         if "MAGMA_OK" not in check.stdout and not args.allow_unpatched_magma:
             sys.exit("Stopping: patch Magma (magma_patches/) or pass --allow-unpatched-magma.")
+        if not args.no_oscar_enum:
+            oscar_enumerate()
         # Work DOWNWARD by rank, with a barrier between ranks.  The orbit method
         # enumerates a definite genus by descending from a parent genus of rank+1
         # and smaller determinant, and FillGenus persists every finished definite
@@ -499,6 +541,7 @@ def main():
                           f"warmlimit:={args.warm_limit}",
                           f"stats:={1 if args.fill_stats else 0}",
                           f"memlimit:={args.memlimit}",
+                          f"oscar:={'oscar_genus_disabled' if args.no_oscar_enum else 'oscar_genus'}",
                           "labels:={1}"],
                          # The wrapper adds done:=1 and checks that every label in the
                          # batch printed DONE or ERROR, so a Magma segfault (which can

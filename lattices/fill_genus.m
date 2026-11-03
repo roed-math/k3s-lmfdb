@@ -279,7 +279,7 @@ function cmp_lat(L1, L2)
     return 0;
 end function;
 
-intrinsic FillGenus(label::MonStgElt : timeout := 1800, masslimit := 0, sizelimit := 0, timelimit := 0, adjlimit := 0, perlattice := 0, use_orth := true, force_orth := false, stats := false)
+intrinsic FillGenus(label::MonStgElt : timeout := 1800, masslimit := 0, sizelimit := 0, timelimit := 0, adjlimit := 0, perlattice := 0, use_orth := true, force_orth := false, stats := false, oscar := "oscar_genus")
 {Fill the data for a genus and its lattice representatives, given files in the genera_basic format.
 
 Enumeration guards (0 = unlimited): masslimit skips enumerating a definite genus whose
@@ -344,9 +344,51 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
         mass_pieces := Split(basics["mass"][2..#basics["mass"]-1], ",");
         genus_mass := StringToInteger(mass_pieces[1]) / StringToInteger(mass_pieces[2]);
     end if;
-    skip_massive := (masslimit gt 0) and (n eq s) and (genus_mass gt masslimit);
     spinor := 0;   // the spinor generators, for indefinite rank >= 3 (see GenusReps)
-    if skip_massive then
+    // Classes enumerated with Oscar (oscar/pool.jl --task enumerate, run by
+    // run_all.py before fill): indefinite genera of rank >= 3, whose Magma spinor
+    // kernel can overcount, and definite genera of small rank, where Oscar is faster.
+    // An ok record replaces GenusReps; its automorphism group orders and root systems
+    // are kept per class (oscar_aut, oscar_root) to cross-check Magma's and to stand in
+    // when Magma's computation overruns.  A failed record falls back to Magma for a
+    // definite genus but not for an indefinite one of rank >= 3, whose Magma class
+    // number may be wrong.
+    oscar_status := "none";
+    oscar_aut := [];
+    oscar_root := [];
+    opath := LabelPath(oscar, label);
+    if OpenTest(opath, "r") then
+        olines := Split(Read(opath), "\n");
+        ohead := AssociativeArray();
+        for kv in Split(olines[1], " ") do
+            pos := Index(kv, "=");
+            if pos gt 0 then ohead[kv[1..pos-1]] := kv[pos+1..#kv]; end if;
+        end for;
+        oscar_status := IsDefined(ohead, "status") select ohead["status"] else "bad";
+        if oscar_status eq "ok" then
+            oreps := [];
+            for line in olines[2..#olines] do
+                f := Split(line, "|");
+                Append(~oreps, GramStringToLat(f[1], n));
+                Append(~oscar_aut, f[2] eq "\\N" select 0 else StringToInteger(f[2]));
+                Append(~oscar_root, f[3]);
+            end for;
+            error if #oreps ne StringToInteger(ohead["classes"]), Sprintf("%o: %o classes in %o, header says %o", label, #oreps, opath, ohead["classes"]);
+            if ohead["spinor_generators"] ne "\\N" then
+                spinor := [StringToInteger(x) : x in Split(ohead["spinor_generators"][2..#ohead["spinor_generators"]-1], ",")];
+            end if;
+        end if;
+    end if;
+    from_oscar := oscar_status eq "ok";
+    no_magma := (not from_oscar) and oscar_status ne "none" and (n ne s) and (n ge 3);
+    skip_massive := (not from_oscar) and (masslimit gt 0) and (n eq s) and (genus_mass gt masslimit);
+    if from_oscar then
+        vprintf FillGenus, 1 : "Classes from %o\n", opath;
+        genus_success, reps, orth_prov := Explode(<true, oreps, 0>);
+    elif no_magma then
+        vprintf FillGenus, 1 : "Oscar enumeration %o; no Magma fallback for an indefinite genus of rank >= 3\n", oscar_status;
+        genus_success := false;
+    elif skip_massive then
         vprintf FillGenus, 1 : "Skipping enumeration: mass exceeds masslimit %o\n", masslimit;
         genus_success := false;
     else
@@ -358,7 +400,8 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
             UseOrth := use_orth and (force_orth or UseOrthHeuristic(n, genus_mass)));
     end if;
     t_enum := Realtime(genus_t0);
-    enum_method := skip_massive select "none" else ((n eq s and use_orth and n ge 3 and (force_orth or UseOrthHeuristic(n, genus_mass))) select "orth" else "default");
+    enum_method := from_oscar select "oscar" else no_magma select "oscar_" * oscar_status else
+                   skip_massive select "none" else ((n eq s and use_orth and n ge 3 and (force_orth or UseOrthHeuristic(n, genus_mass))) select "orth" else "default");
     adj_status := "none";
     advanced["class_number"] := "\\N";
     // Indefinite rank >= 3: the classes are labelled by their spinor coordinates
@@ -576,6 +619,16 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
                     lat["aut_label"] := ad[4];
                 end if;
             end if;
+            // Oscar's automorphism group order (isometry_group): a cross-check, and the
+            // value when Magma's computation overran (aut_size is a sort key, cmp_lat)
+            if from_oscar and oscar_aut[Li] gt 0 then
+                if Type(lat["aut_size"]) eq RngIntElt then
+                    error if lat["aut_size"] ne oscar_aut[Li],
+                        Sprintf("%o class %o: #Aut %o from Magma, %o from Oscar", label, Li, lat["aut_size"], oscar_aut[Li]);
+                else
+                    lat["aut_size"] := oscar_aut[Li];
+                end if;
+            end if;
             D := Dual(L);
             // LLL always finishes (polynomial time), so it is safe here in the batch
             // process, and it caches a reduced basis on L and D that every child below
@@ -596,12 +649,22 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
                 lat["hermite"] := md[4];
                 lat["root_sublattice"] := md[5];
                 dm := md[6];
-            else
+            elif not (from_oscar and oscar_root[Li] ne "\\N") then
                 // The root system is a sort key (cmp_lat), so try it on its own:
                 // enumerating vectors of norm <= 2 can be much cheaper than finding
                 // the minimum.
                 ok, rs := TimeoutCall(to_per_rep, root_string_of, <L>, 1 : HardKill := true);
                 if ok then lat["root_sublattice"] := rs[1]; end if;
+            end if;
+            // Oscar's root system (root_lattice_recognition, same string format): a
+            // cross-check, and the value when Magma's overran
+            if from_oscar and oscar_root[Li] ne "\\N" then
+                if lat["root_sublattice"] ne "\\N" then
+                    error if lat["root_sublattice"] ne oscar_root[Li],
+                        Sprintf("%o class %o: root system %o from Magma, %o from Oscar", label, Li, lat["root_sublattice"], oscar_root[Li]);
+                else
+                    lat["root_sublattice"] := oscar_root[Li];
+                end if;
             end if;
             target_prec := Max(150, m+4);
             theta, theta_prec, rep_theta_elapsed := ThetaSeriesIncremental(L, target_prec, to_per_rep : Min := m);
