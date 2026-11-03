@@ -128,6 +128,21 @@ def read_stats(tree):
     return stats
 
 
+def read_connect_stats(tree):
+    """connect_stats/ (run_all.py --connect-stats): label -> (seconds over both
+    passes, any error)."""
+    out = {}
+    for dp, _, fns in os.walk(Path(tree, "connect_stats")):
+        for fn in fns:
+            f = Path(dp, fn).read_text().strip().split("|")
+            if len(f) != 4:
+                continue
+            label, _, status, secs = f
+            t, err = out.get(label, (0.0, False))
+            out[label] = (t + float(secs), err or status != "ok")
+    return out
+
+
 def q(xs, p):
     if not xs:
         return float("nan")
@@ -195,6 +210,27 @@ def cmd_report(a):
             for r, nm, b, t in costs:
                 F.write("%d %d %d %.3f\n" % (r, nm, b, t))
         print(f"\nwrote {len(costs)} stratum costs to {a.costs_out} (use with run_all.py --genus-costs)")
+    cstats = read_connect_stats(tree)
+    if cstats:
+        ctot = defaultdict(lambda: [0.0, 0, 0, 0])   # (rank, definite) -> [cpu_h, pop, measured, errors]
+        for st in sorted(by):
+            ts = [cstats[l][0] for l in sample if stratum(l) == st and l in cstats]
+            if not ts:
+                continue
+            c = ctot[(st[0], st[1] == 0)]
+            c[0] += statistics.mean(ts) * pop.get(st, 0) / 3600
+            c[1] += pop.get(st, 0)
+            c[2] += len(ts)
+            c[3] += sum(1 for l in sample if stratum(l) == st and l in cstats and cstats[l][1])
+        print("\nconnect (both passes; run_all.py --connect-stats), extrapolated like fill:")
+        print("rank  type   population  measured  errors  est_cpu_hours  mean_s_per_genus")
+        tot = 0.0
+        for (r, definite) in sorted(ctot):
+            cpu_h, P, m, e = ctot[(r, definite)]
+            tot += cpu_h
+            print("%4d  %-5s  %10d  %8d  %6d  %13.1f  %16.2f" % (r, "def" if definite else "indef", P, m, e,
+                                                                cpu_h, cpu_h * 3600 / P if P else 0))
+        print("total connect cpu hours: %.1f" % tot)
     missing = [l for l in sample if l not in stats]
     if missing:
         print(f"\n{len(missing)} sampled genera have no fill_stats record (crash, error, or not run): "

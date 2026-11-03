@@ -251,6 +251,12 @@ python3 calibrate_fill.py report --costs-out genus_costs.tsv > calibration_repor
 sage -python run_all.py ... --genus-costs genus_costs.tsv
 ```
 
+To price connect as well, run it on the filled sample before the report:
+`sage -python run_all.py --skip-list-genera --skip-enumerate-genera --connect-stats
+-j 32 --skip-embeddings --skip-tensor --skip-names`.  The report then adds a connect
+table.  Lookups into genera outside the sample find nothing and return quickly, so
+connect times measured this way are a lower bound.
+
 `--clean` here leaves the sampled `genera_basic/` alone (it is the input when
 `--skip-list-genera` is given).  Each `fill_stats/` record gives the outcome
 (`ok`, or the guard that decided it: `mass_skip`, `enum_fail`, `size_skip`,

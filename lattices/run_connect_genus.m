@@ -30,6 +30,10 @@ timeout := StringToInteger(timeout);
 // factor data); "2" = consume (derive the decomposable fields from factor data now on
 // disk); unset/"0" = single pass (do everything).
 if not assigned phase then phase := "0"; end if;
+// stats:=1 writes connect_stats/<rank>/<nplus>/<label>.<phase>: label|phase|status|seconds,
+// for pricing connect on a calibration sample (calibrate_fill.py report).
+if not assigned stats then stats := "0"; end if;
+stats := StringToInteger(stats) ne 0;
 
 if assigned labels then
     label_list := Split(labels, ":");
@@ -40,6 +44,8 @@ end if;
 procedure() // forcing magma to read the full input before forking
 failed := [];
 for l in label_list do
+    t0 := Realtime();
+    status := "ok";
     try
         if phase eq "2" then
             ConnectGenusDerive(l);
@@ -51,7 +57,11 @@ for l in label_list do
     catch e
         printf "ERROR: %o: %o\n", l, e;
         Append(~failed, l);
+        status := "error";
     end try;
+    if stats then
+        Write(LabelPath("connect_stats", l * "." * phase : Create), Sprintf("%o|%o|%o|%o", l, phase, status, Realtime(t0)) : Overwrite);
+    end if;
 end for;
 
 if #failed gt 0 then

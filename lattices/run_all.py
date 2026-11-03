@@ -90,6 +90,7 @@ parser.add_argument("--embed-timelimit", type=int, default=3600, help="Wall-cloc
 
 # Skip stages
 parser.add_argument("--memlimit", type=int, default=32, help="Memory cap in GB for each Magma process in the fill and connect stages (SetMemoryLimit; 0 = none).  A job can hold two processes at once (the batch and a TimeoutCall child), so budget ~2x this per -j slot.  A child over the cap dies and that computation counts as failed; a batch process over it ends, and run_fill_genus.sh reports its unfinished genera.  Without a cap, rank-17 genera on the C=32768 census ran Magma processes up to 220 GB.")
+parser.add_argument("--connect-stats", action="store_true", help="Have each connect pass write connect_stats/<rank>/<nplus>/<label>.<phase> (label|phase|status|seconds), so a calibration sample prices connect too (calibrate_fill.py report).")
 parser.add_argument("--fill-stats", action="store_true", help="Have FillGenus write one fill_stats/<rank>/<nplus>/<label> record per genus (fields in fill_stats.format): the outcome -- ok, or which guard decided it (mass_skip, enum_fail, size_skip, time_discard) -- the class number, per-phase wall-clock and the slowest single lattice.  Off by default (it is another file per genus); calibrate_fill.py turns it on.")
 parser.add_argument("--skip-list-genera", action="store_true", help="Assume that genera have already been listed")
 parser.add_argument("--no-oscar-enum", action="store_true", help="Enumerate every genus with Magma.  By default the genera Oscar handles better -- indefinite of rank >= --oscar-indefinite-min-rank (Magma's spinor kernel overcounts some of them) and definite of rank <= --oscar-definite-max-rank (Oscar is faster there) -- are enumerated first by a pool of Oscar workers (oscar/pool.jl --task enumerate, records in oscar_genus/), and fill takes their classes from those records.")
@@ -516,7 +517,7 @@ def clean_outputs():
     """
     targets = ["genera_advanced", "genera_hash", "lattice_basic_data",
                "lattice_advanced_data", "lattice_hashes", "voronoi", "shortest",
-               "orth_cache", "fill_stats", "oscar_genus",   # stale cached genera would leak old counters/labels into provenance
+               "orth_cache", "fill_stats", "connect_stats", "oscar_genus",   # stale cached genera would leak old counters/labels into provenance
                "inclusions", "embed_labels", "refine_sidecar", "label_lookups", "label_lookups_done",
                "festi_veniani", "festi_veniani_jobs"]
     if not args.skip_list_genera:
@@ -753,10 +754,12 @@ def main():
         # are flat and fully parallel; the only barrier is between them.
         with timed("Connecting genera (pass 1: produce)"):
             parallel("genus_jobs.txt", "connect1.joblog",
-                     ["labels:={1}", "phase:=1", f"memlimit:={args.memlimit}", "run_connect_genus.m"])
+                     ["labels:={1}", "phase:=1", f"memlimit:={args.memlimit}",
+                      f"stats:={1 if args.connect_stats else 0}", "run_connect_genus.m"])
         with timed("Connecting genera (pass 2: consume)"):
             parallel("genus_jobs.txt", "connect2.joblog",
-                     ["labels:={1}", "phase:=2", f"memlimit:={args.memlimit}", "run_connect_genus.m"])
+                     ["labels:={1}", "phase:=2", f"memlimit:={args.memlimit}",
+                      f"stats:={1 if args.connect_stats else 0}", "run_connect_genus.m"])
         # Lookups FindLabel could not decide -- an indefinite genus of rank >= 3 with
         # several classes, or a Magma overrun hashing a lattice or testing isometry --
         # are recorded in label_lookups/ by connect; the Oscar pool's resolve task
