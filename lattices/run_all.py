@@ -66,6 +66,10 @@ parser.add_argument("--skip-list-genera", action="store_true", help="Assume that
 parser.add_argument("--allow-unpatched-magma", action="store_true", help="Fill even if Magma fails check_magma.m.  Unpatched Magma gets indefinite binary genera wrong (classes outside the genus, missing classes); the census must not be run with it.  See magma_patches/.")
 parser.add_argument("--skip-enumerate-genera", action="store_true", help="Skip the fill stage (genus enumeration).  This does NOT imply --skip-list-genera: listing still runs unless that is also given, which is how the census listing was run (listing only, with --skip-embeddings).")
 parser.add_argument("--skip-embeddings", action="store_true", help="Do not compute primitive and K3 embedding data")
+parser.add_argument("--skip-festi-veniani", action="store_true", help="Do not fill in festi_veniani_index after the fill stage (it stays null; run oscar/fix_festi_veniani.jl later)")
+parser.add_argument("--fv-jobs", type=int, default=8, help="Parallel Julia workers for festi_veniani_index (each loads Oscar: ~30s and a few GB)")
+parser.add_argument("--fv-chunk", type=int, default=5000, help="Genera per festi_veniani_index job; |O(q_L)| takes milliseconds for most genera and under 0.5s for the hardest census discriminant forms, so jobs are dominated by Oscar's startup")
+parser.add_argument("--fv-timelimit", type=int, default=3600, help="GNU parallel timeout (seconds) per festi_veniani_index job; genera of a job that times out keep a null index")
 parser.add_argument("--skip-tensor", action="store_true", help="Do not compute tensor product decompositions")
 parser.add_argument("--skip-names", action="store_true", help="Do not find lattice names")
 parser.add_argument("--skip-connect", action="store_true", help="Do not run_connect_genus.m")
@@ -366,6 +370,34 @@ def audit_fill(jobfile, missing_file):
     elif Path(missing_file).exists():
         Path(missing_file).unlink()
 
+def fill_festi_veniani():
+    """festi_veniani_index = [O(q_L) : image of O(L)].  Fill records the image orders in
+    festi_veniani/ and leaves the column null; oscar/fix_festi_veniani.jl computes
+    |O(q_L)| per genus (Magma has no orthogonal groups of torsion quadratic forms) and
+    writes the index.  Chunks of genera run under GNU parallel; every job rewrites only
+    finished genera, so a rerun is safe and a timed-out chunk leaves its rest null."""
+    base = Path("festi_veniani")
+    labels = sorted(f.name for f in base.rglob("*") if f.is_file() and not f.name.endswith(".tmp")) if base.is_dir() else []
+    if not labels:
+        return
+    if not check_oscar():
+        print("  WARNING: no working Oscar; festi_veniani_index stays null "
+              "(run oscar/fix_festi_veniani.jl from lattices/ once Oscar works)", flush=True)
+        return
+    jobdir = Path("festi_veniani_jobs")
+    if jobdir.exists():
+        shutil.rmtree(jobdir)
+    jobdir.mkdir()
+    chunks = []
+    for k in range(0, len(labels), args.fv_chunk):
+        f = jobdir / f"chunk_{k // args.fv_chunk:05d}.txt"
+        f.write_text("\n".join(labels[k:k + args.fv_chunk]) + "\n")
+        chunks.append(str(f))
+    Path("festi_veniani_jobs.txt").write_text("\n".join(chunks) + "\n")
+    with timed(f"Festi-Veniani indices (Oscar): {len(labels)} genera in {len(chunks)} jobs"):
+        parallel("festi_veniani_jobs.txt", "festi_veniani.joblog", ["oscar/fix_festi_veniani.jl", ".", "{1}"],
+                 prog=["julia", "--project=oscar"], jobs=args.fv_jobs, timeout=args.fv_timelimit, env=julia_env())
+
 def clean_outputs():
     """Delete pipeline outputs so this run's data cannot be a mixture of several runs.
 
@@ -380,7 +412,8 @@ def clean_outputs():
     targets = ["genera_advanced", "genera_hash", "lattice_basic_data",
                "lattice_advanced_data", "lattice_hashes", "voronoi", "shortest",
                "orth_cache", "fill_stats",   # stale cached genera would leak old counters/labels into provenance
-               "inclusions", "embed_labels", "refine_sidecar", "indefinite_lookups"]
+               "inclusions", "embed_labels", "refine_sidecar", "indefinite_lookups",
+               "festi_veniani", "festi_veniani_jobs"]
     if not args.skip_list_genera:
         targets.append("genera_basic")   # regenerated below; otherwise it is this run's input
     removed = []
@@ -473,6 +506,8 @@ def main():
                          # silently missing genera.
                          prog=["./run_fill_genus.sh"])
             audit_fill(f"genus_jobs_{r}.txt", f"fill_missing_{r}.txt")
+        if not args.skip_festi_veniani:
+            fill_festi_veniani()
 
     if not args.skip_embeddings:
         # Julia/Oscar embedding stage (oscar/INTEGRATION_PLAN.md): overlattices,

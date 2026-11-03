@@ -34,6 +34,18 @@ pipe-separated columns of the corresponding records.
    series and Gram matrix (`cmp_lat`), and that order is the label tiebreaker.
    A key whose computation timed out sorts after every computed one, so the
    labels are fixed by the run that enumerates the genus.
+   **Festi-Veniani index** (Julia/Oscar, [`oscar/fix_festi_veniani.jl`](oscar/fix_festi_veniani.jl),
+   right after fill): fill records the order of the image of O(L) on the
+   discriminant group in `festi_veniani/` and leaves `festi_veniani_index` null;
+   this computes |O(q_L)| per genus (Magma has no orthogonal groups of torsion
+   quadratic forms) and writes [O(q_L) : image].  Chunks of `--fv-chunk` genera run
+   under GNU parallel (`--fv-jobs`, `--fv-timelimit`); `--skip-festi-veniani` skips
+   it.  Data filled before 2026-11 stored #Aut(L#/L) / |image| instead (the
+   automorphism group of the abelian group, a different number whenever O(q_L) is
+   smaller); convert it once with
+   `julia --project=oscar oscar/fix_festi_veniani.jl --legacy .`, which first saves
+   the image orders to `festi_veniani/`, so a rerun is harmless.  Keep
+   `festi_veniani/` with the data.
 3. **Tensor products** (Magma, [`run_tensor.m`](run_tensor.m)).
 4. **Names** (Magma, [`run_basic_names.m`](run_basic_names.m)): atomic lattice
    names, merged across workers.
@@ -162,6 +174,7 @@ tests/run.sh --slow             # also test_brandhorst and test_l12a_plus (~2.5 
 tests/run.sh test_universality  # one suite, streaming its output
 python3 tests/test_schema_consistency.py
 python3 oscar/test_refine_universality.py
+julia --project=oscar oscar/test_fix_festi_veniani.jl
 ```
 
 CI (`.github/workflows/tests.yml`) runs one job per Magma suite once the

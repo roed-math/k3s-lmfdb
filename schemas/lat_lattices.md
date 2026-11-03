@@ -75,7 +75,7 @@ Label: `dimension.signature.determinant.genus_spec.tiebreaker` where
 | pneighbors | jsonb | a dictionary with primes as keys and a list of labels as values (the p-neighbors) |
 | discriminant_group_invs | integer[] | Smith-style invariants for the discriminant group |
 | discriminant_group_exponent | integer | Exponent of the discriminant group |
-| festi_veniani_index | numeric | the index of the lattice automorphism group within the automorphism group of the discriminant group |
+| festi_veniani_index | numeric | the Festi-Veniani index [O(q_L) : im O(L)]: the index of the image of the automorphism group of L in the orthogonal group of its discriminant form (definite lattices; computed by oscar/fix_festi_veniani.jl) |
 | is_even | boolean | whether the lattice is even |
 | dual_label | text | the label for the rescaled dual lattice (may be null if the discriminant is too large) |
 | dual_theta_series | numeric[] | the theta series of the rescaled dual lattice |

@@ -130,10 +130,16 @@ function successive_minima_of(L)
     return minima;
 end function;
 
-// The Festi-Veniani index and the SmallGroups label of the automorphism group ("\N"
-// when IdentifyGroup cannot handle the order).  The discriminant group's automorphism
-// group order and invariants are returned so that the caller can check them against
-// the genus: an assert in the child would only make the call fail quietly.
+// The order of the image of O(L) in the automorphism group of the discriminant group
+// L^#/L, and the SmallGroups label of the automorphism group ("\N" when IdentifyGroup
+// cannot handle the order).  The image lies in O(q_L), and the Festi-Veniani index is
+// [O(q_L) : image]; Magma has no orthogonal groups of torsion quadratic forms, so
+// oscar/fix_festi_veniani.jl computes |O(q_L)| and the index from the image order,
+// which fill records in festi_veniani/ (the index used to divide #Aut(L^#/L), the
+// automorphism group of the abelian group, instead of |O(q_L)|).  The discriminant
+// group's automorphism group order and invariants are returned so that the caller can
+// check them against the genus: an assert in the child would only make the call fail
+// quietly.
 function aut_data(Lcanon, aut_group, disc_aut_size)
     LD := Dual(Lcanon : Rescale:=false);
     discL, quo := LD/Lcanon;
@@ -145,7 +151,7 @@ function aut_data(Lcanon, aut_group, disc_aut_size)
         Aid := IdentifyGroup(aut_group);
         aut_label := Sprintf("%o.%o", Aid[1], Aid[2]);
     end if;
-    return disc_aut_size div #sub<disc_aut | im_aut>, #disc_aut, Invariants(discL), aut_label;
+    return #sub<disc_aut | im_aut>, #disc_aut, Invariants(discL), aut_label;
 end function;
 
 function SphereVolume(n)
@@ -482,7 +488,8 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
         // This is no longer part of the lattice, only of the genus
         // lat["dual_conway"] := "\\N";
         lat["aut_size"] := "\\N";
-        lat["festi_veniani_index"] := "\\N";
+        lat["festi_veniani_index"] := "\\N";   // filled in by oscar/fix_festi_veniani.jl
+        lat["fv_image"] := "\\N";              // |image of O(L) in Aut(L^#/L)|, for festi_veniani/
         lat["aut_label"] := "\\N";
         lat["aut_group"] := "\\N";
         lat["is_chiral"] := "\\N";
@@ -565,7 +572,7 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
                 if ok then
                     assert disc_aut_size eq ad[2];
                     assert disc_invs eq ad[3];
-                    lat["festi_veniani_index"] := ad[1];
+                    lat["fv_image"] := ad[1];
                     lat["aut_label"] := ad[4];
                 end if;
             end if;
@@ -719,8 +726,16 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
     // so that it can be looked up when needed (see lookup_hash_function in connect_genus.m)
     Write(LabelPath("genera_hash", n, s, IntegerToString(advanced["genus_hash"]) : Create), advanced["hash_function"] : Overwrite);
 
+    // festi_veniani/<rank>/<nplus>/<genus>: "<lattice label>|<image order>" for every
+    // lattice whose image of O(L) on the discriminant group was computed; the index
+    // itself is \N here and oscar/fix_festi_veniani.jl fills it in.
+    fv_lines := [Sprintf("%o|%o", lat["label"], lat["fv_image"]) : lat in lats | Type(lat["fv_image"]) eq RngIntElt];
+    if #fv_lines gt 0 then
+        Write(LabelPath("festi_veniani", basics["label"] : Create), Join(fv_lines, "\n") : Overwrite);
+    end if;
     for idx->L in lats do
         lat := L;
+        Remove(~lat, "fv_image");
         if have_adjacency then   // pneighbors are read off the Hecke matrix, so only when it was computed
             pNeighbors := AssociativeArray();
             for p in hecke_primes(n) do
