@@ -12,6 +12,17 @@ V2.30-1; for other versions check that each hunk applies, and port by hand if no
     lattice of content > 1.
   `run_all.py` runs `check_magma.m` before the fill stage and stops if the first
   fix is missing.  Reported to Magma on 2026-10-22.
+- **`mass-2.30-1.patch` (required).**  `package/Lattice/Lat/mass.m`:
+  `DedekindZetaExact` computed L(chi_d, 1-n), which `Mass` needs for every lattice of
+  rank 2 mod 4 with non-square discriminant, by evaluating the L-series numerically
+  and recognising the rational with `BestApproximation`.  That gives wrong masses from
+  rank 14 on (I_13 + <2127>: off by a relative 1e-30) and runtime errors from rank 26
+  on; in a scan of 183 discriminants it was wrong or failed for 14% at rank 14, 67% at
+  rank 22, 95% at rank 30.  The patch uses -B_{k,chi_d}/k, exact for every k.  With it
+  Magma's masses agree with Sage's on all 545 definite genera of the benchmark sample.
+  The orbit method and the p-neighbour walk stop on Magma's `Mass`, so a wrong mass
+  breaks enumeration.  `check_magma.m` requires it (`MagmaMassPatched`).  Bug report:
+  `mass-2.30-1-report.md`.
 - **`diagonal-2.30-1-indefinite.patch` (partial, not yet required).**
   `package/Lattice/Lat/diagonal.m`: `SpinorKernel` ignored the signature, so it
   treated an indefinite form as definite at infinity and doubled the number of

@@ -1,0 +1,35 @@
+--- package/Lattice/Lat/mass.m
++++ package/Lattice/Lat/mass.m
+@@ -600,17 +600,26 @@
+ {The Dedekind zeta function of K at z. Returns L_K(z) or (L_K/L_F)(z) if [K:F]=2 and Relative is true.}
+   require (Relative and z eq 0) or z lt 0 : "The argument must be a negative integer";
+ 
++  k:= 1-z;
++  // For a quadratic field K, (L_K/L_Q)(1-k) = L(chi_d, 1-k) = -B_{k,chi_d}/k for every
++  // k >= 1 (Washington, Introduction to Cyclotomic Fields, Thm. 4.2); it vanishes when
++  // chi_d(-1) <> (-1)^k.  This is exact for both parities of z.  Evaluating the L-series
++  // numerically instead (below) and recognising the value with BestApproximation can
++  // return a wrong rational, e.g. for d = -2127, z = -6.
++  if AbsoluteDegree(K) eq 2 and Relative then
++    // AbsoluteDiscriminant is |d|; chi_d needs the sign of d.
++    d:= AbsoluteDiscriminant(Integers(K)) * (IsTotallyReal(K) select 1 else -1);
++    chi:= KroneckerCharacter(d, Rationals());
++    if Evaluate(chi, -1) ne (-1)^k then return 0; end if;    // BernoulliNumber(k, chi) asserts this
++    return BernoulliNumber(k, chi) / -k;
++  end if;
++
+   if IsOdd(z) then
+-    k:= 1-z;
+     if AbsoluteDegree(K) eq 1 then
+       return BernoulliNumber(k)/-k;
+     elif AbsoluteDegree(K) eq 2 and IsTotallyReal(K) then
+       d:= AbsoluteDiscriminant(Integers(K));
+-      if Relative then
+-        return BernoulliNumber(k, KroneckerCharacter(d, Rationals())) / -k;
+-      else
+-        return BernoulliNumber(k) * BernoulliNumber(k, KroneckerCharacter(d, Rationals())) / k^2;
+-      end if;
++      return BernoulliNumber(k) * BernoulliNumber(k, KroneckerCharacter(d, Rationals())) / k^2;
+     end if;
+   end if;
+ 

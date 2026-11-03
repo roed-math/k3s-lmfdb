@@ -113,12 +113,14 @@ must be on `PATH` for the GNU parallel stages; on macOS the default install
 location is not on `PATH`, so run the pipeline with
 `PATH="/Applications/Magma:$PATH"`.
 
-Magma must also carry the patch in [`magma_patches/`](magma_patches): without it
-`GenusRepresentatives` returns wrong classes for indefinite binary lattices
-(lattices from another genus, missing classes).  Apply it from Magma's root
-directory with `patch -p0 < .../magma_patches/neighbors-2.30-1.patch`;
-`magma -b check_magma.m` (from `lattices/`) prints `MAGMA_OK` once it is in, and
-`run_all.py` runs that check before the fill stage.
+Magma must also carry the two required patches in [`magma_patches/`](magma_patches):
+without `neighbors-2.30-1.patch`, `GenusRepresentatives` returns wrong classes for
+indefinite binary lattices (lattices from another genus, missing classes); without
+`mass-2.30-1.patch`, `Mass` is wrong or fails for many lattices of rank 2 mod 4 from
+rank 14 on, which breaks the mass-verified enumerations.  Apply each from Magma's
+root directory with `patch -p0 < .../magma_patches/<name>.patch` (try `--dry-run`
+first on other versions); `magma -b check_magma.m` (from `lattices/`) prints
+`MAGMA_OK` once both are in, and `run_all.py` runs that check before the fill stage.
 
 ### SageMath
 

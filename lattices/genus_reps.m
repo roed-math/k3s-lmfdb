@@ -142,6 +142,28 @@ on every seed tried, x^2 - 79y^2 in about 49 calls in 50.}
     return true, "";
 end intrinsic;
 
+intrinsic MagmaMassPatched() -> BoolElt, MonStgElt
+{Whether this Magma's Mass is exact for lattices of rank 2 mod 4, i.e. carries
+magma_patches/mass-2.30-1.patch, and if not, a description of the first failure.
+Unpatched, DedekindZetaExact evaluates L(chi_d, 1 - n) numerically for those ranks
+and can recognise the wrong rational (or fail outright from rank 26 on), and the
+mass-verified enumerations here stop on Magma's Mass.}
+    // I_13 + <2127>: the mass checked with Sage and Oscar; unpatched 2.29-10 and 2.30-1
+    // are off by a relative 1e-30.
+    L := LatticeWithGram(DiagonalMatrix(Integers(), [1 : i in [1..13]] cat [2127]));
+    m := Mass(L);
+    if m ne 12561949209912499297859/54655451136000 then
+        return false, Sprintf("Mass(I_13 + <2127>) = %o, expected 12561949209912499297859/54655451136000", m);
+    end if;
+    // L(chi_{-307}, -8), which a rank-18 mass needs: wrong on unpatched 2.30-1.
+    x := DedekindZetaExact(QuadraticField(-307), -8 : Relative);
+    y := -BernoulliNumber(9, KroneckerCharacter(-307, Rationals())) / 9;
+    if x ne y then
+        return false, Sprintf("DedekindZetaExact(QuadraticField(-307), -8 : Relative) = %o, expected %o", x, y);
+    end if;
+    return true, "";
+end intrinsic;
+
 function genus_reps_Logan(L)
     // neighbours was renamed neighbours_old when list_genus took over; keep the
     // wrapper pointing at the surviving implementation.
