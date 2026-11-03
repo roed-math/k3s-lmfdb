@@ -30,7 +30,8 @@ Run from lattices/ (plain python3; Sage is not needed):
 The tasks (same names in bench_magma.m and bench_oscar.jl, which hold the actual
 calls) are what both systems can compute that the pipeline stores: class_number,
 mass, aut_order, aut_label, minimum, kissing, successive_minima, root_system, theta,
-orth_decomp, isometric_same, isometric_other, disc_image.  Variant "default" is the
+orth_decomp, isometric_same, isometric_other, disc_image, and (Oscar only) oq_order,
+|O(q_L)| for the Festi-Veniani index.  Variant "default" is the
 pipeline's Magma code path and Oscar's documented function; other variants are
 alternatives (Magma's stock intrinsics, Oscar's enumeration algorithms) run with
 --variants all.  Not covered, because only Magma has them: canonical forms, Hecke
@@ -60,7 +61,7 @@ from calibrate_fill import iter_census_labels, parse_label  # noqa: E402
 
 TASKS = ["class_number", "mass", "aut_order", "aut_label", "minimum", "kissing",
          "successive_minima", "root_system", "theta", "orth_decomp", "isometric_same",
-         "isometric_other", "disc_image"]
+         "isometric_other", "disc_image", "oq_order"]
 # Variants other than "default", per system (must match the servers).
 VARIANTS = {
     "magma": {"class_number": ["stock"], "aut_order": ["stock"], "orth_decomp": ["stock"]},

@@ -158,6 +158,11 @@ const TASKS = Dict{String, Dict{String, Impl}}(
         "default" => Impl(c -> c.gram_other !== nothing, (L, c, M) -> lattice_of(M),
                           (L, M, c) -> string(is_isometric(L, M))),
     ),
+    # |O(q_L)| alone (the numerator of the Festi-Veniani index); Magma has no
+    # orthogonal groups of torsion quadratic forms.
+    "oq_order" => Dict(
+        "default" => Impl(always, nosetup, (L, s, c) -> string(order(orthogonal_group(discriminant_group(L))))),
+    ),
     "disc_image" => Dict(
         # The isometry group is computed in the setup, as the Magma side computes the
         # automorphism group there; the timed part is the image in O(q_L).

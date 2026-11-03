@@ -136,8 +136,10 @@ VARIANTS["orth_decomp"] := ["default", "stock"];
 VARIANTS["isometric_same"] := ["default"];
 VARIANTS["isometric_other"] := ["default"];
 VARIANTS["disc_image"] := ["default"];
+VARIANTS["oq_order"] := ["default"];      // Oscar only: Magma has no O(q) for torsion forms
 
 function applies(task, variant, c)
+    if task eq "oq_order" then return false; end if;
     if task eq "class_number" then return true; end if;
     if task in ["isometric_same", "isometric_other"] then
         G := task eq "isometric_same" select c`gram_iso else c`gram_other;
