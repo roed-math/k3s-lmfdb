@@ -207,7 +207,7 @@ def cmd_sample(a):
             mass = "-"
             if rec.get("mass") not in (None, "\\N", "None", ""):
                 num, den = parse_braces(rec["mass"])
-                mass = f"{num}/{den}"
+                mass = f"{num}/{den}" if den != 1 else str(num)    # as both systems print it
             rows.append({
                 "id": label, "rank": rank, "nplus": nplus, "det": det, "class_number": cn,
                 "mass": mass,
@@ -729,7 +729,8 @@ def cmd_report(a):
                 r = res.get((sysname, cid, task, "default"))
                 if r and r["status"] == "ok" and c[col] != "-":
                     n += 1
-                    if r["value"] != c[col]:
+                    stored = c[col][:-2] if c[col].endswith("/1") else c[col]   # older samples wrote n/1
+                    if r["value"] != stored:
                         bad += 1
                         mismatches.append((f"{task} ({sysname} vs census)", cid, c[col], r["value"]))
             if n:
