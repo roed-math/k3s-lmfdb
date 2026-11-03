@@ -517,7 +517,7 @@ def clean_outputs():
     targets = ["genera_advanced", "genera_hash", "lattice_basic_data",
                "lattice_advanced_data", "lattice_hashes", "voronoi", "shortest",
                "orth_cache", "fill_stats", "oscar_genus",   # stale cached genera would leak old counters/labels into provenance
-               "inclusions", "embed_labels", "refine_sidecar", "indefinite_lookups",
+               "inclusions", "embed_labels", "refine_sidecar", "label_lookups", "label_lookups_done",
                "festi_veniani", "festi_veniani_jobs"]
     if not args.skip_list_genera:
         targets.append("genera_basic")   # regenerated below; otherwise it is this run's input
@@ -529,7 +529,8 @@ def clean_outputs():
             shutil.rmtree(p)
     for f in ([Path("atomic_names"), Path("lat_inclusions.tbl")] + sorted(Path(".").glob("atomic_names_partial_*"))
               + sorted(Path(".").glob("fill_missing_*.txt"))
-              + [Path("oscar_labels.txt"), Path("oscar_enum.ledger.tsv")]):
+              + [Path("oscar_labels.txt"), Path("oscar_enum.ledger.tsv"), Path("lookup_labels.txt"),
+                 Path("label_lookups.ledger.tsv")]):
         if f.exists():
             f.unlink()
             removed.append(f.name)
@@ -756,22 +757,29 @@ def main():
         with timed("Connecting genera (pass 2: consume)"):
             parallel("genus_jobs.txt", "connect2.joblog",
                      ["labels:={1}", "phase:=2", f"memlimit:={args.memlimit}", "run_connect_genus.m"])
-        # Labels in indefinite genera of rank >= 3 with several classes, which only
-        # Oscar can decide: connect records those lookups in indefinite_lookups/
-        # (FindLabel), and resolve_indefinite.jl fills in the columns.
-        lookups = Path("indefinite_lookups")
-        if lookups.is_dir() and any(f.is_file() for f in lookups.rglob("*")):
-            with timed("Resolving indefinite lookups (Oscar)"):
-                try:
-                    r = subprocess.run(["julia", "--project=oscar", "oscar/resolve_indefinite.jl", "."],
-                                       env=julia_env())
-                    ok = r.returncode == 0
-                except FileNotFoundError:
-                    ok = False
-                if not ok:
-                    print("WARNING: oscar/resolve_indefinite.jl failed; the columns it would fill "
-                          "stay null (rerun it from lattices/ once Oscar works)", flush=True)
-
+        # Lookups FindLabel could not decide -- an indefinite genus of rank >= 3 with
+        # several classes, or a Magma overrun hashing a lattice or testing isometry --
+        # are recorded in label_lookups/ by connect; the Oscar pool's resolve task
+        # tests them with is_isometric and patches the advanced records.
+        lookups = Path("label_lookups")
+        sources = sorted(f.name for f in lookups.rglob("*") if f.is_file()) if lookups.is_dir() else []
+        if sources:
+            Path("lookup_labels.txt").write_text("\n".join(sources) + "\n")
+            if not check_oscar():
+                print(f"WARNING: Julia/Oscar environment not ready; {len(sources)} lattices keep "
+                      "null labels connect could not decide (label_lookups/)", flush=True)
+            else:
+                # resolution records go to a fresh directory: the patched columns are
+                # rewritten by every connect run, so earlier records do not carry over
+                if Path("label_lookups_done").is_dir():
+                    shutil.rmtree("label_lookups_done")
+                with timed(f"Resolving {len(sources)} lattices' deferred label lookups (Oscar)"):
+                    subprocess.run(["julia", "--project=oscar", "--startup-file=no", "oscar/pool.jl",
+                                    "--task", "resolve", "--labels-file", "lookup_labels.txt",
+                                    "--jobs", str(args.oscar_jobs or args.jobs), "--timeout", str(args.oscar_timeout),
+                                    "--memlimit", str(args.oscar_memlimit), "--batch", str(args.oscar_batch),
+                                    "--data-root", ".", "--out-root", "label_lookups_done",
+                                    "--ledger", "label_lookups.ledger.tsv"], env=julia_env())
 
 if __name__ == "__main__":
     try:

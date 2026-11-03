@@ -127,10 +127,13 @@ intrinsic FindLabel(L::Lat : genus_data:=<>, Timeout := 0) -> MonStgElt, MonStgE
 two steps that can run unbounded -- hashing L and the isometry tests against the
 classes sharing its hash -- each run in a HardKill TimeoutCall of that many seconds,
 and an overrun returns null; the lookups themselves stay in this process, where the
-hash cache lives.  The second value is the label of L's genus when L lies in an
+hash cache lives.  The second value is non-empty when the lookup should be retried
+with Oscar (label_lookups/, resolved by the pool task resolve in
+oscar/LMFDBLattices/src/resolve.jl): the label of L's genus when L lies in an
 indefinite genus of rank >= 3 with several stored classes, which Magma cannot
-decide between (null is returned; see ConnectGenus and oscar/resolve_indefinite.jl),
-and the empty string otherwise.}
+decide between, or when hashing L overran; "genus;label,label,..." -- the classes
+sharing L's hash -- when the isometry test overran.  It is the empty string when
+the returned label is final.}
     if #genus_data eq 0 then
         genus_data := FindGenusData(L);
     end if;
@@ -171,7 +174,10 @@ and the empty string otherwise.}
     else
         if Timeout gt 0 then
             ok, hv := TimeoutCall(Timeout, HashLat, <L, genus_hash, hash_func>, 1 : HardKill := true);
-            if not ok then return "\\N", ""; end if;
+            if not ok then
+                pieces := Split(Values(by_hash)[1][1][label_pos], ".");
+                return "\\N", Join(pieces[1..#pieces-1], ".");      // every class is a candidate
+            end if;
             h := hv[1];
         else
             h := HashLat(L, genus_hash, hash_func);
@@ -186,7 +192,10 @@ and the empty string otherwise.}
         grams := [lat[gram_pos] : lat in poss];
         if Timeout gt 0 then
             ok, iv := TimeoutCall(Timeout, first_isometric, <L, grams, n>, 1 : HardKill := true);
-            if not ok then return "\\N", ""; end if;
+            if not ok then
+                pieces := Split(poss[1][label_pos], ".");
+                return "\\N", Join(pieces[1..#pieces-1], ".") * ";" * Join([p[label_pos] : p in poss], ",");
+            end if;
             i := iv[1];
         else
             i := first_isometric(L, grams, n);
@@ -897,9 +906,9 @@ two-pass connect in run_all.py).}
             _ := LLL(L);
             _ := LLL(D);
         end if;
-        // Lookups that land in an indefinite genus of rank >= 3 with several classes,
-        // which Magma cannot tell apart: <column, genus label, lattice>, left for
-        // oscar/resolve_indefinite.jl (see the end of this loop).
+        // Lookups FindLabel could not decide (an indefinite genus of rank >= 3 with
+        // several classes, or a Magma overrun): <column, genus[;candidates], lattice>,
+        // left for Oscar (see the end of this loop).
         deferred := [* *];
         lat["dual_det"] := Determinant(D);
         lat["dual_label"], dgenus := FindLabel(D : Timeout := timeout);
@@ -1196,14 +1205,18 @@ two-pass connect in run_all.py).}
             if Rank(R1) eq 0 or Rank(R1) eq n then
                 lat["norm1_complement"] := "\\N";
             else
-                lat["norm1_complement"] := FindLabel(OrthogonalComplementFaster(L, R1) : Timeout := timeout);
+                C1 := OrthogonalComplementFaster(L, R1);
+                lat["norm1_complement"], dgenus := FindLabel(C1 : Timeout := timeout);
+                if dgenus ne "" then Append(~deferred, <"norm1_complement", dgenus, C1>); end if;
             end if;
 
             R := sub<L | [L | L ! v : v in lc[2]]>;
             if Rank(R) eq 0 or Rank(R) eq n then
                 lat["root_complement"] := "\\N";
             else
-                lat["root_complement"] := FindLabel(OrthogonalComplementFaster(L, R) : Timeout := timeout);
+                C2 := OrthogonalComplementFaster(L, R);
+                lat["root_complement"], dgenus := FindLabel(C2 : Timeout := timeout);
+                if dgenus ne "" then Append(~deferred, <"root_complement", dgenus, C2>); end if;
             end if;
         end if;
         end if;   // definite: norm-1 and root sublattices
@@ -1233,13 +1246,16 @@ two-pass connect in run_all.py).}
         */
 
 
-        // Write the deferred lookups for oscar/resolve_indefinite.jl, which tests the
-        // lattice against each class of the genus with Oscar's is_isometric and
-        // patches the column in this lattice's advanced record.
-        sidecar := LabelPath("indefinite_lookups", lat["label"]);
+        // Write the deferred lookups for Oscar (pool task resolve), which tests the
+        // lattice against the candidate classes with is_isometric and patches the
+        // column in this lattice's advanced record.  Line format:
+        // column|genus|gram|candidate labels (empty = every class of the genus).
+        sidecar := LabelPath("label_lookups", lat["label"]);
         if #deferred gt 0 then
-            Write(LabelPath("indefinite_lookups", lat["label"] : Create),
-                  Join([Sprintf("%o|%o|%o", d[1], d[2], to_postgres(Eltseq(ChangeRing(GramMatrix(d[3]), Integers()))))
+            Write(LabelPath("label_lookups", lat["label"] : Create),
+                  Join([Sprintf("%o|%o|%o|%o", d[1], Split(d[2], ";")[1],
+                                to_postgres(Eltseq(ChangeRing(GramMatrix(d[3]), Integers()))),
+                                #Split(d[2], ";") gt 1 select Split(d[2], ";")[2] else "")
                         : d in deferred], "\n") : Overwrite);
         elif OpenTest(sidecar, "r") then
             System("rm -f " * sidecar);   // left by an earlier connect run

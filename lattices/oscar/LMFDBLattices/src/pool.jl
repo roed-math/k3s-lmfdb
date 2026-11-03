@@ -50,7 +50,8 @@ function selftest_task(label::AbstractString, root::AbstractString)
     return "status=ok seconds=0\n"
 end
 
-const TASKS = Dict{String, Function}("enumerate" => enumerate_task, "selftest" => selftest_task)
+const TASKS = Dict{String, Function}("enumerate" => enumerate_task, "resolve" => resolve_task,
+                                     "selftest" => selftest_task)
 
 """
     run_batch(task, labels, root, out_root) -> Int

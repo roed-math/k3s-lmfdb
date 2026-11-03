@@ -62,11 +62,15 @@ pipe-separated columns of the corresponding records.
    [`run_connect_genus.m`](run_connect_genus.m), two passes): everything that
    needs data across genera — duals, orthogonal decompositions, geometric
    invariants, names, and the universality/regularity columns (see below).
-   Writes `lattice_advanced_data/`.  Labels in indefinite genera of rank >= 3
-   with several classes need an isometry test Magma lacks; connect records those
-   lookups in `indefinite_lookups/`, and
-   [`oscar/resolve_indefinite.jl`](oscar/resolve_indefinite.jl) fills them in
-   with Oscar afterwards.
+   Writes `lattice_advanced_data/`.  Label lookups `FindLabel` cannot decide --
+   in an indefinite genus of rank >= 3 with several classes (an isometry test
+   Magma lacks), or where hashing or Magma's isometry test overran -- are
+   recorded in `label_lookups/` with their candidate classes, and the Oscar
+   pool's `resolve` task ([`oscar/LMFDBLattices/src/resolve.jl`](oscar/LMFDBLattices/src/resolve.jl))
+   fills them in afterwards with `is_isometric`.  This covers `dual_label`,
+   `primitive_scaling`, `even_sublattice`, `norm1_complement` and
+   `root_complement`; lookups for orthogonal factors and from tensor/names stay
+   null.
 7. **Embeddings** (Julia/Oscar, [`oscar/driver.jl`](oscar/driver.jl) under GNU
    parallel; design in [`oscar/INTEGRATION_PLAN.md`](oscar/INTEGRATION_PLAN.md)):
    prime-index overlattices, corank-1 primitive embeddings (rank n → n+1) and
