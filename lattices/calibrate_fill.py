@@ -128,6 +128,20 @@ def read_stats(tree):
     return stats
 
 
+def genus_footprint(tree, label, stored):
+    """Files and bytes the pipeline keeps for one genus in the calibration tree: its
+    genera_basic, genera_advanced and oscar_genus records and, per stored lattice,
+    its lattice_basic_data and lattice_advanced_data records (the per-genus hash
+    files are not counted: they are named by hash, not label)."""
+    rank, nplus, _ = parse_label(label)
+    sub = Path(str(rank), str(nplus))
+    paths = [Path(tree, d, sub, label) for d in ("genera_basic", "genera_advanced", "oscar_genus")]
+    for i in range(1, stored + 1):
+        paths += [Path(tree, d, sub, f"{label}.{i}") for d in ("lattice_basic_data", "lattice_advanced_data")]
+    sizes = [p.stat().st_size for p in paths if p.is_file()]
+    return len(sizes), sum(sizes)
+
+
 def read_connect_stats(tree):
     """connect_stats/ (run_all.py --connect-stats): label -> (seconds over both
     passes, any error)."""
@@ -231,6 +245,29 @@ def cmd_report(a):
             print("%4d  %-5s  %10d  %8d  %6d  %13.1f  %16.2f" % (r, "def" if definite else "indef", P, m, e,
                                                                 cpu_h, cpu_h * 3600 / P if P else 0))
         print("total connect cpu hours: %.1f" % tot)
+    # storage: lattices, files and bytes per genus, extrapolated like the costs
+    store = defaultdict(lambda: [0, 0.0, 0.0, 0.0])    # rank -> [pop, lattices, files, bytes]
+    for st in sorted(by):
+        recs = [(l, stats[l]) for l in sample if stratum(l) == st and l in stats]
+        if not recs:
+            continue
+        P = pop.get(st, 0)
+        lat = [int(r["lattices_stored"]) for _, r in recs]
+        fp = [genus_footprint(tree, l, int(r["lattices_stored"])) for l, r in recs]
+        s_ = store[st[0]]
+        s_[0] += P
+        s_[1] += statistics.mean(lat) * P
+        s_[2] += statistics.mean(f for f, _ in fp) * P
+        s_[3] += statistics.mean(b for _, b in fp) * P
+    if store:
+        print("\nstorage (fill output in this tree, extrapolated; connect adds similar-sized advanced records):")
+        print("rank  genera(pop)  est_lattices  est_files  est_GB")
+        tot = [0, 0.0, 0.0, 0.0]
+        for r in sorted(store):
+            P, nl, nf, nb = store[r]
+            tot = [tot[0] + P, tot[1] + nl, tot[2] + nf, tot[3] + nb]
+            print("%4d  %11d  %12.0f  %9.0f  %6.2f" % (r, P, nl, nf, nb / 1e9))
+        print("total %11d  %12.0f  %9.0f  %6.2f" % (tot[0], tot[1], tot[2], tot[3] / 1e9))
     missing = [l for l in sample if l not in stats]
     if missing:
         print(f"\n{len(missing)} sampled genera have no fill_stats record (crash, error, or not run): "
