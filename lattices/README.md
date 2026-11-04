@@ -55,6 +55,27 @@ pipe-separated columns of the corresponding records.
    `julia --project=oscar oscar/fix_festi_veniani.jl --legacy .`, which first saves
    the image orders to `festi_veniani/`, so a rerun is harmless.  Keep
    `festi_veniani/` with the data.
+   **Theta-Hecke pass** (Magma, [`theta_hecke.m`](theta_hecke.m) via
+   [`run_theta_hecke.m`](run_theta_hecke.m), right after fill):
+   `is_theta_distinguished` says whether the theta series tell the classes of a
+   definite genus apart.  Fill decides it when the theta series differ early or
+   agree to the Sturm precision (`ThetaSturmPrecision`, extending them when that
+   is cheap); the rest it leaves null and records in `theta_hecke/`.  The pass
+   decides those from the coefficients fill already has, using Eichler's
+   commutation relation: summing theta series over the p-neighbours of a class is
+   the Hecke operator T(p^2) + p + ... + p^(n-3) applied to its theta series.  So
+   the relations among the theta series are stable under the adjacency matrix;
+   a pair whose difference falls outside the largest stable space of relations
+   that hold to the known precision has different theta series (no modular forms
+   needed), and the remaining relations lie in the Hecke eigenspaces of the cusp
+   space matching the adjacency eigenvalues, which a handful of coefficients
+   usually determines -- then they hold exactly.  Genera sharing a cusp space run
+   in one job (`--theta-hecke-chunk`, `--theta-hecke-jobs`), which builds the
+   space (modular symbols; a q-expansion basis in half-integral weight) once;
+   `--theta-hecke-timeout` bounds each adjacency matrix and space.  Verdicts go to
+   `theta_hecke_done/` and into `genera_advanced`; eigenspace data per cusp space
+   is kept in `theta_hecke_spaces/` (it depends only on the space, so `--clean`
+   leaves it).  `--skip-theta-hecke` skips the pass.
 4. **Tensor products** (Magma, [`run_tensor.m`](run_tensor.m)).
 5. **Names** (Magma, [`run_basic_names.m`](run_basic_names.m)): atomic lattice
    names, merged across workers.

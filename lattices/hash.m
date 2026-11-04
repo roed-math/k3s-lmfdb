@@ -76,8 +76,8 @@ intrinsic HashLat(L::Lat, genus_hash::RngIntElt, hash_func::MonStgElt) -> RngInt
     end if;
 end intrinsic;
 
-function FirstDiff(f1, f2, M)
-    // The smallest integer where f1 and f2 differ, or M if there is no difference up to precision M
+intrinsic FirstDiff(f1::SeqEnum, f2::SeqEnum, M::RngIntElt) -> RngIntElt
+{The smallest m < M with a_m(f1) ne a_m(f2) (missing coefficients are 0), or M if they agree to precision M.}
     m := 0;
     while m lt M do
         c1 := (m lt #f1) select f1[m+1] else 0;
@@ -88,7 +88,7 @@ function FirstDiff(f1, f2, M)
         m +:= 1;
     end while;
     return M;
-end function;
+end intrinsic;
 
 function PickBest(hash_opts)
     // Given a sequence of triples <-distinguished, total_time, func_name>, pick the best
@@ -96,8 +96,12 @@ function PickBest(hash_opts)
     return Minimum(hash_opts);
 end function;
 
-intrinsic SetHashes(~lats::SeqEnum[Assoc], ~genus::Assoc, theta_elapsed::Assoc, timeout::RngIntElt)
-{Set hash values and theta distinguishing information}
+intrinsic SetHashes(~lats::SeqEnum[Assoc], ~genus::Assoc, theta_elapsed::Assoc, timeout::RngIntElt : Adjacency := AssociativeArray(), Sidecar := "", Extend := true)
+{Set hash values and theta distinguishing information.  Adjacency: p -> the adjacency
+matrix at p in the order of lats (as FillGenus computes it); Sidecar: a folder for the
+theta-Hecke pass's input record of a genus whose theta series this leaves undecided
+("" = none); Extend: whether to extend agreeing theta series to the Sturm precision
+when feasible (otherwise they are left to the pass).}
     L0 := lats[1]["lattice"];
     genus_hash := HashGenus(Genus(L0)); // TODO: could have problems if gram is too big to store in shortint[] so we're using gram_others.
     genus["genus_hash"] := genus_hash;
@@ -154,7 +158,7 @@ intrinsic SetHashes(~lats::SeqEnum[Assoc], ~genus::Assoc, theta_elapsed::Assoc, 
         open := #agreeing;
         for a in agreeing do
             if a[3] ge P then status := "equal"; break; end if;
-            if theta_vector_estimate(lats[a[1]]["lattice"], P) gt const_theta_vector_cap then continue; end if;
+            if not Extend or theta_vector_estimate(lats[a[1]]["lattice"], P) gt const_theta_vector_cap then continue; end if;
             left := Floor(deadline - Realtime());
             if left lt 1 then break; end if;
             ok1, t1 := TimeoutCall(left, ThetaSeries, <lats[a[1]]["lattice"], P - 1>, 1 : HardKill := true);
@@ -168,6 +172,22 @@ intrinsic SetHashes(~lats::SeqEnum[Assoc], ~genus::Assoc, theta_elapsed::Assoc, 
             open -:= 1;
         end for;
         if status ne "equal" and open eq 0 then status := "distinguished"; end if;
+    end if;
+    // Undecided: leave the genus to the theta-Hecke pass (theta_hecke.m,
+    // run_theta_hecke.m), which decides it from these coefficients with the p-neighbour
+    // graph and the Hecke eigenspaces of the cusp space.  Its input record:
+    //   n|N|D|p|halve|h          (ThetaFormData, ThetaHeckePrime)
+    //   the adjacency matrix at p, row-major in the order of lats, or \N
+    //   gram|theta series        (one line per class, in label order)
+    if status eq "unknown" and Sidecar ne "" and rank ge 3 then
+        th_halve, th_N, th_D := ThetaFormData(L0);
+        th_p := ThetaHeckePrime(L0);
+        head := Sprintf("%o|%o|%o|%o|%o|%o", rank, th_N, th_D, th_p, th_halve select 1 else 0, #lats);
+        adjtext := IsDefined(Adjacency, th_p) select to_postgres(Eltseq(Adjacency[th_p])) else "\\N";
+        rows := [to_postgres(Eltseq(GramMatrix(lat["lattice"]))) * "|" * to_postgres(lat["theta_series"][1 .. Minimum(#lat["theta_series"], lat["theta_prec"])]) : lat in lats];
+        cols := GetColumns(); SetColumns(0);      // Write wraps long lines otherwise
+        Write(LabelPath(Sidecar, lats[1]["genus_label"] : Create), Join([head, adjtext] cat rows, "\n") : Overwrite);
+        SetColumns(cols);
     end if;
     genus["theta_distinguishing_prec"] := dprec;
     genus["is_theta_distinguished"] := status eq "distinguished" select true else

@@ -108,6 +108,10 @@ parser.add_argument("--skip-festi-veniani", action="store_true", help="Do not fi
 parser.add_argument("--fv-jobs", type=int, default=8, help="Parallel Julia workers for festi_veniani_index (each loads Oscar: ~30s and a few GB)")
 parser.add_argument("--fv-chunk", type=int, default=5000, help="Genera per festi_veniani_index job; |O(q_L)| takes milliseconds for most genera and under 0.5s for the hardest census discriminant forms, so jobs are dominated by Oscar's startup")
 parser.add_argument("--fv-timelimit", type=int, default=3600, help="GNU parallel timeout (seconds) per festi_veniani_index job; genera of a job that times out keep a null index")
+parser.add_argument("--skip-theta-hecke", action="store_true", help="Do not run the theta-Hecke pass after fill: is_theta_distinguished stays null for the genera fill could not decide (some theta series agree to the known precision, and extending them to the Sturm bound was too expensive).  The pass decides them with Eichler's commutation relation between p-neighbours and Hecke operators (theta_hecke.m).")
+parser.add_argument("--theta-hecke-jobs", type=int, default=8, help="Parallel Magma jobs for the theta-Hecke pass; genera sharing a cusp space go to one job, which builds the space once")
+parser.add_argument("--theta-hecke-chunk", type=int, default=200, help="About this many genera per theta-Hecke job (whole cusp-space groups are never split)")
+parser.add_argument("--theta-hecke-timeout", type=int, default=600, help="Seconds (HardKill) per adjacency matrix and per cusp space in the theta-Hecke pass; over it the genus stays undecided")
 parser.add_argument("--skip-tensor", action="store_true", help="Do not compute tensor product decompositions")
 parser.add_argument("--skip-names", action="store_true", help="Do not find lattice names")
 parser.add_argument("--skip-connect", action="store_true", help="Do not run_connect_genus.m")
@@ -507,6 +511,89 @@ def fill_festi_veniani():
         parallel("festi_veniani_jobs.txt", "festi_veniani.joblog", ["oscar/fix_festi_veniani.jl", ".", "{1}"],
                  prog=["julia", "--project=oscar"], jobs=args.fv_jobs, timeout=args.fv_timelimit, env=julia_env())
 
+def theta_hecke_pass():
+    """is_theta_distinguished for the genera fill left undecided.  SetHashes writes
+    theta_hecke/<r>/<nplus>/<label> for each (the classes' Gram matrices and theta
+    series, the adjacency matrix when fill computed it at the right prime); then
+    run_theta_hecke.m decides them with the p-neighbour graph and the Hecke eigenspaces
+    of the cusp space (theta_hecke.m) and writes theta_hecke_done/.  A job holds whole
+    groups of genera sharing a cusp space, so each space is built once per run, and
+    theta_hecke_spaces/ keeps the eigenspace data across runs (it depends only on the
+    space).  Genera with a verdict are skipped on a rerun; the verdicts are patched into
+    genera_advanced, where the field is still null."""
+    base = Path("theta_hecke")
+    if not base.is_dir():
+        return
+    groups = defaultdict(list)
+    for f in base.rglob("*"):
+        if not f.is_file() or ".tmp" in f.name:
+            continue
+        if not Path("theta_hecke_done", *f.parts[1:]).exists():
+            with open(f) as F:
+                groups[tuple(F.readline().split("|")[:4])].append(f.name)
+    if groups:
+        jobdir = Path("theta_hecke_jobs")
+        if jobdir.exists():
+            shutil.rmtree(jobdir)
+        jobdir.mkdir()
+        jobs, cur = [], []
+        for key in sorted(groups, key=lambda k: -len(groups[k])):
+            cur += groups[key]
+            if len(cur) >= args.theta_hecke_chunk:
+                jobs.append(cur)
+                cur = []
+        if cur:
+            jobs.append(cur)
+        names = []
+        for k, labs in enumerate(jobs):
+            f = jobdir / f"job_{k:05d}.txt"
+            f.write_text("\n".join(labs) + "\n")
+            names.append(str(f))
+        Path("theta_hecke_jobs.txt").write_text("\n".join(names) + "\n")
+        ngen = sum(len(v) for v in groups.values())
+        with timed(f"Theta-Hecke pass: {ngen} genera, {len(groups)} cusp spaces, {len(jobs)} jobs"):
+            parallel("theta_hecke_jobs.txt", "theta_hecke.joblog",
+                     [f"timeout:={args.theta_hecke_timeout}", f"memlimit:={args.memlimit}", "labels:={1}", "run_theta_hecke.m"],
+                     jobs=args.theta_hecke_jobs)
+    patch_theta_hecke()
+
+def patch_theta_hecke():
+    """Write the theta-Hecke verdicts into genera_advanced (true = distinguished,
+    false = some classes have equal theta series) where fill left is_theta_distinguished
+    null.  A verdict contradicting fill's is a bug in one of them: reported, not written."""
+    fmt = Path("genera_basic.format").read_text().strip().split("|") + Path("genera_advanced.format").read_text().strip().split("|")
+    col = fmt.index("is_theta_distinguished")
+    counts = defaultdict(int)
+    for f in Path("theta_hecke_done").rglob("*") if Path("theta_hecke_done").is_dir() else []:
+        if not f.is_file() or ".tmp" in f.name:
+            continue
+        status = f.read_text().split("|")[0]
+        counts[status] += 1
+        if status not in ("distinguished", "equal"):
+            continue
+        value = "true" if status == "distinguished" else "false"
+        adv = Path("genera_advanced", *f.parts[1:])
+        if not adv.exists():
+            continue
+        lines = adv.read_text().split("\n")
+        fields = lines[0].split("|")
+        if len(fields) != len(fmt):
+            print(f"  ERROR: {adv}: {len(fields)} fields, expected {len(fmt)}", flush=True)
+            continue
+        if fields[col] == value:
+            continue
+        if fields[col] != "\\N":
+            print(f"  ERROR: {f.name}: fill says is_theta_distinguished={fields[col]}, the theta-Hecke pass {value}", flush=True)
+            continue
+        fields[col] = value
+        lines[0] = "|".join(fields)
+        tmp = adv.with_name(adv.name + ".tmp")
+        tmp.write_text("\n".join(lines))
+        os.replace(tmp, adv)
+        counts["patched"] += 1
+    if counts:
+        print("  theta-Hecke verdicts: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())), flush=True)
+
 def clean_outputs():
     """Delete pipeline outputs so this run's data cannot be a mixture of several runs.
 
@@ -522,7 +609,8 @@ def clean_outputs():
                "lattice_advanced_data", "lattice_hashes", "voronoi", "shortest",
                "orth_cache", "fill_stats", "connect_stats", "oscar_genus",   # stale cached genera would leak old counters/labels into provenance
                "inclusions", "embed_labels", "embed_pool", "refine_sidecar", "label_lookups", "label_lookups_done",
-               "festi_veniani", "festi_veniani_jobs"]
+               "festi_veniani", "festi_veniani_jobs", "theta_hecke", "theta_hecke_done", "theta_hecke_jobs"]
+    # theta_hecke_spaces/ is kept: eigenspace data of cusp spaces, a function of the space alone
     if not args.skip_list_genera:
         targets.append("genera_basic")   # regenerated below; otherwise it is this run's input
     removed = []
@@ -634,6 +722,8 @@ def main():
             audit_fill(f"genus_jobs_{r}.txt", f"fill_missing_{r}.txt")
         if not args.skip_festi_veniani:
             fill_festi_veniani()
+        if not args.skip_theta_hecke:
+            theta_hecke_pass()
 
     if not args.skip_embeddings:
         # Julia/Oscar embedding stage (oscar/INTEGRATION_PLAN.md): overlattices,

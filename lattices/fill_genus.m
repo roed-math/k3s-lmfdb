@@ -773,7 +773,10 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
     end if;
 
     if #lats gt 0 then
-        SetHashes(~lats, ~advanced, theta_elapsed, timeout);
+        // the Hecke matrices (in label order, above) let the theta-Hecke pass skip
+        // recomputing the adjacency of a genus SetHashes leaves undecided
+        SetHashes(~lats, ~advanced, theta_elapsed, timeout :
+                  Adjacency := have_adjacency select hecke_mats else AssociativeArray(), Sidecar := "theta_hecke");
     else
         // GenusRepresentatives failed (e.g. timed out on a hard genus): record the
         // genus with no stored lattices.  HashGenus factors through the canonical
