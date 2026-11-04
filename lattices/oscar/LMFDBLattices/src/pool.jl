@@ -115,6 +115,11 @@ function start_worker(exeflags)
 end
 
 function kill_worker(pw::PoolWorker)
+    # Mark the worker as being removed before killing it: otherwise Distributed reads
+    # the dead socket as an unexpected death and prints "Worker N terminated." and an
+    # unhandled EOFError.  rmprocs would mark it too, but only once it gets
+    # worker_lock, which addprocs holds while a replacement worker starts.
+    try Distributed.set_worker_state(Distributed.worker_from_id(pw.id), Distributed.W_TERMINATING) catch end
     try run(`kill -9 $(pw.pid)`) catch end
     try rmprocs(pw.id; waitfor = 0) catch end
 end
