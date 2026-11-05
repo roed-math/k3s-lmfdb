@@ -265,7 +265,7 @@ Two structural notes that make cutoffs safer than they look:
 | --- | --- | --- |
 | 0. env + smoke (~½ day, mostly precompile) — **env half done 2026-07-16 (see §2)** | juliaup, pinned project, tiny local dataset via `run_all.py -R 6 -D 300` (Magma is local), run all three tasks on it | rows produced end-to-end, `lat_inclusions.tbl` lints clean |
 | 1. correctness | loader + driver + writer, §6.1–6.2 validation on the script_1 slice + ~100 random Magma cross-checks | zero discrepancies, or each one explained |
-| 2. scale hardening | atomic units, ledgers, resume, timeout/OOM behavior, overflow guards | kill -9 mid-run + rerun = identical table |
+| 2. scale hardening — **atomic units + resume done 2026-10-21**: units are det-sorted chunks of `--embed-chunk` domain genera (one job each, committed atomically with an inputs sha1; reruns skip committed jobs; an unfinished chunk caps the certificate below its smallest det). Per-job wall time is in each manifest (`seconds=`). Still open: a `units.jsonl` ledger, overflow guards | atomic units, ledgers, resume, timeout/OOM behavior, overflow guards | kill -9 mid-run + rerun = identical table |
 | 3. calibration | `--embed-calibrate` on the production listing, projection report, pick caps to budget | signed-off core-hours + row-count projection |
 | 4. production + upload | run (local or lovelace — needs authorization), `write_table.jl`, upload with the other lat_* tables from the *same* generation run, coverage note | `lat_inclusions` live on beta, coverage documented |
 

@@ -33,11 +33,88 @@ Q := Rationals();
  * Wrappers for the individual enumeration methods (moved from fill_genus.m)
  ****************************************************************************/
 
+// Isometry (GL2(Z)-equivalence, proper or improper) of two indefinite binary
+// lattices of the same non-square discriminant.  Magma's IsEquivalent on binary
+// quadratic forms is PROPER equivalence; f is improperly equivalent to g iff it is
+// properly equivalent to g's mirror (a, -b, c).
+function binary_isometric(G1, G2)
+    D := 4*(G1[1,2]^2 - G1[1,1]*G1[2,2]);
+    Q := BinaryQuadraticForms(D);
+    f := Q!<Integers()!G1[1,1], Integers()!(2*G1[1,2]), Integers()!G1[2,2]>;
+    g := Q!<Integers()!G2[1,1], Integers()!(2*G2[1,2]), Integers()!G2[2,2]>;
+    gm := Q!<Integers()!G2[1,1], -Integers()!(2*G2[1,2]), Integers()!G2[2,2]>;
+    return IsEquivalent(f, g) or IsEquivalent(f, gm);
+end function;
+
+// Complete isometry invariant of a rank-2 lattice of square determinant -m^2.  A
+// primitive isotropic vector w extends to a basis (w, v) with Gram [[0, p], [p, q]],
+// and det = -p^2 forces p = m (v -> -v makes it +m); v is determined up to adding
+// multiples of w, which shifts q by multiples of 2m, so q mod 2m is an invariant of
+// the lattice with that isotropic line.  There are exactly two isotropic lines, so
+// the smaller of the two values is an invariant of the lattice -- it is the k of the
+// canonical [[0, m], [m, k]] that genus_reps_square_disc stores, up to
+// square_disc_isometric.
+function square_disc_key(G)
+    G := ChangeRing(G, Integers());
+    a := G[1,1]; b := G[1,2]; c := G[2,2];
+    m := Isqrt(b^2 - a*c);
+    if a eq 0 then
+        iso := [Vector(Integers(), [1, 0]), Vector(Integers(), [-c, 2*b])];
+    else
+        iso := [Vector(Integers(), [-b + m, a]), Vector(Integers(), [-b - m, a])];
+    end if;
+    ks := [];
+    for w0 in iso do
+        if IsZero(w0) then continue; end if;
+        w := w0 div GCD(Eltseq(w0));
+        row := Vector(Integers(), Eltseq(Matrix(w) * G));        // v -> <w, v>
+        _, x, y := XGCD(w[1], w[2]);                             // x w1 + y w2 = 1
+        v := Vector(Integers(), [-y, x]);                        // det(w, v) = 1
+        pv := (Matrix(v) * Transpose(Matrix(row)))[1][1];        // <w, v> = +-m
+        if pv lt 0 then v := -v; end if;
+        q := (Matrix(v) * G * Transpose(Matrix(v)))[1][1];
+        Append(~ks, q mod (2*m));
+    end for;
+    return Min(ks);
+end function;
+
+intrinsic IsIsometricBinary(L1::Lat, L2::Lat) -> BoolElt
+{Isometry of two indefinite rank-2 lattices of the same determinant (proper or
+improper).  Magma's IsIsometric needs a definite form.}
+    G1 := GramMatrix(L1); G2 := GramMatrix(L2);
+    require Rank(L1) eq 2 and Rank(L2) eq 2 : "rank-2 lattices only";
+    require Determinant(G1) eq Determinant(G2) and Determinant(G1) lt 0 :
+        "indefinite lattices of the same determinant only";
+    if IsSquare(-Determinant(G1)) then
+        return square_disc_key(G1) eq square_disc_key(G2);
+    end if;
+    return binary_isometric(G1, G2);
+end intrinsic;
+
 function genus_reps_Magma(L)
     // The bound is set to infinity to avoid Magma printing an error message
     // without throwing a runtime error.
     if IsPositiveDefinite(GramMatrix(L)) or (Rank(L) eq 2) then
-      return GenusRepresentatives(L : Bound := Infinity());
+      reps := GenusRepresentatives(L : Bound := Infinity());
+      // Unpatched Magma (2.30-1 and presumably earlier) gets indefinite binary
+      // genera wrong: its BinaryGenusRepresentatives can return lattices outside the
+      // genus, miss classes, and return a class together with its mirror image.  The
+      // fix is magma_patches/neighbors-2.30-1.patch, and run_all.py refuses
+      // to fill without it (MagmaBinaryGenusPatched below).  Keeping one
+      // representative per isometry class is then a no-op, kept as a guard.
+      // (Square discriminants never get here -- genus_reps_square_disc -- and the
+      // definite case already returns isometry classes.)
+      G := GramMatrix(L);
+      if Rank(L) eq 2 and not IsPositiveDefinite(G) and not IsPositiveDefinite(-G) then
+        kept := [];
+        for R in reps do
+          if not exists{K : K in kept | binary_isometric(GramMatrix(R), GramMatrix(K))} then
+            Append(~kept, R);
+          end if;
+        end for;
+        reps := kept;
+      end if;
+      return reps;
     end if;
     // due to some bugs in Magma, we convert to number field
     LF := NumberFieldLattice(L);
@@ -45,6 +122,69 @@ function genus_reps_Magma(L)
     return [LatticeWithGram(ChangeRing(GramMatrix(r), Integers()) :
 			    CheckPositive := false) : r in reps];
 end function;
+
+intrinsic MagmaBinaryGenusPatched() -> BoolElt, MonStgElt
+{Whether this Magma's GenusRepresentatives is right on indefinite binary lattices,
+i.e. carries magma_patches/neighbors-2.30-1.patch, and if not, a description
+of the first failure.  Each case fails on unpatched 2.30-1: x^2 - 34y^2 with Proper
+on every seed tried, x^2 - 79y^2 in about 49 calls in 50.}
+    lat := func<g | LatticeWithGram(Matrix(Integers(), 2, 2, g) : CheckPositive := false)>;
+    // <gram, Proper, number of classes>, the numbers checked with Sage
+    for t in [<[1, 0, 0, -34], true, 2>, <[1, 0, 0, -79], false, 2>, <[1, 0, 0, -79], true, 3>,
+              <[1, 0, 0, -37], false, 2>] do
+        L := lat(t[1]);
+        R := GenusRepresentatives(L : Proper := t[2]);
+        if #R ne t[3] or exists{M : M in R | Genus(M) ne Genus(L)} then
+            return false, Sprintf("GenusRepresentatives(%o : Proper := %o) returned %o lattices, expected %o; in the genus: %o",
+                                  t[1], t[2], #R, t[3], [Genus(M) eq Genus(L) : M in R]);
+        end if;
+    end for;
+    return true, "";
+end intrinsic;
+
+intrinsic MagmaMassPatched() -> BoolElt, MonStgElt
+{Whether this Magma's Mass is exact for lattices of rank 2 mod 4, i.e. carries
+magma_patches/mass-2.30-1.patch, and if not, a description of the first failure.
+Unpatched, DedekindZetaExact evaluates L(chi_d, 1 - n) numerically for those ranks
+and can recognise the wrong rational (or fail outright from rank 26 on), and the
+mass-verified enumerations here stop on Magma's Mass.}
+    // I_13 + <2127>: the mass checked with Sage and Oscar; unpatched 2.29-10 and 2.30-1
+    // are off by a relative 1e-30.
+    L := LatticeWithGram(DiagonalMatrix(Integers(), [1 : i in [1..13]] cat [2127]));
+    m := Mass(L);
+    if m ne 12561949209912499297859/54655451136000 then
+        return false, Sprintf("Mass(I_13 + <2127>) = %o, expected 12561949209912499297859/54655451136000", m);
+    end if;
+    // L(chi_{-307}, -8), which a rank-18 mass needs: wrong on unpatched 2.30-1.
+    x := DedekindZetaExact(QuadraticField(-307), -8 : Relative);
+    y := -BernoulliNumber(9, KroneckerCharacter(-307, Rationals())) / 9;
+    if x ne y then
+        return false, Sprintf("DedekindZetaExact(QuadraticField(-307), -8 : Relative) = %o, expected %o", x, y);
+    end if;
+    return true, "";
+end intrinsic;
+
+intrinsic MagmaSpinorPatched() -> BoolElt, MonStgElt
+{Whether this Magma's spinor characters are right on indefinite lattices of rank >= 3,
+i.e. carries magma_patches/diagonal-2.30-1.patch, and if not, a description of the first
+failure.  Each case is an indefinite ternary L with a q-neighbour isometric to L (so q is
+improperly automorphous and every spinor character is 1 at q), on which one of the three
+bugs fixed by the patch shows; the expected numbers of characters agree with Hecke
+(with Hecke.jl PR #2611) and with GenusRepresentatives.}
+    // <Gram matrix, q, number of spinor characters>: bug 1 (SpinorKernel ignored the
+    // signature), bug 2 (SpinorCharacters did not free the coordinate it adds at -1),
+    // bug 3 (SpinorCharacters took a complement of the kernel, not its annihilator).
+    for t in [<[4,1,0, 1,10,0, 0,0,-54], 5, 0>, <[-9,0,0, 0,18,0, 0,0,64], 7, 1>,
+              <[1,0,0, 0,-48,24, 0,24,213], 11, 1>] do
+        L := LatticeWithGram(Matrix(Integers(), 3, 3, t[1]) : CheckPositive := false);
+        X := SpinorCharacters(Genus(L) : Proper := false);
+        if #X ne t[3] or exists{x : x in X | Evaluate(x, t[2]) ne 1} then
+            return false, Sprintf("SpinorCharacters of the genus of %o: %o characters with values %o at %o, expected %o characters, all 1 there",
+                                  t[1], #X, [Evaluate(x, t[2]) : x in X], t[2], t[3]);
+        end if;
+    end for;
+    return true, "";
+end intrinsic;
 
 function genus_reps_Logan(L)
     // neighbours was renamed neighbours_old when list_genus took over; keep the
@@ -58,16 +198,85 @@ function genus_reps_Faster(L)
     return reps;
 end function;
 
+// The spinor generators of an indefinite genus of rank >= 3: Magma's
+// SpinorGenerators(G : Proper := false) restricted to odd primes.  Taking primes in
+// increasing order, keep p if it does not divide det and its spinor character values
+// are independent of those of the primes already kept.  Magma's version also tries
+// 2 when det and the characters' modulus are odd, but a 2-neighbour step needs a
+// vector outside 2L of norm divisible by 4, which an odd lattice may not have
+// (diag(1,1,1)): Neighbors(L, 2) is then empty and Magma's SpinorGenera fails, e.g.
+// on 3.2.3375.11.11.2a7.  Odd primes not dividing det always give neighbours in
+// rank >= 3, and by Dirichlet's theorem they realise every character vector.
+function spinor_generators(G)
+    xgens := SpinorCharacters(G : Proper := false);
+    X := Universe(xgens);
+    if #xgens eq 1 and xgens[1] eq X!1 then
+        return [ Integers() | ];
+    end if;
+    d := Determinant(G);
+    V := VectorSpace(GF(2), #xgens);
+    U := sub< V | V!0 >;
+    gens := [ Integers() | ];
+    p := 3;
+    while U ne V do
+        if d mod p ne 0 then
+            w := V![ (1 - Evaluate(x, p)) div 2 : x in xgens ];
+            if w notin U then
+                U := sub< V | Basis(U) cat [ w ] >;
+                Append(~gens, p);
+            end if;
+        end if;
+        p := NextPrime(p);
+    end while;
+    return gens;
+end function;
+
 function genus_reps_Spinor(L)
-    // Indefinite lattices of rank >= 3: by Eichler each (proper) spinor genus consists
+    // Indefinite lattices of rank >= 3: by Eichler each improper spinor genus consists
     // of a single isometry class -- but a genus may contain SEVERAL spinor genera, so
     // all of them must be enumerated.  SpinorRepresentatives(L) alone returns only the
     // class of L's own spinor genus and under-enumerates, e.g. diag(1,20,-25), whose
     // genus has two spinor genera hence two classes.  This route also avoids Magma's
     // GenusRepresentatives, which fails on some indefinite genera (e.g. signature (2,2)
     // rank 4 -- "Illegal null sequence" / "cs must be non-empty" in its LatNF code).
-    return [Representative(S) : S in SpinorGenera(Genus(L))];
+    //
+    // The classes form a torsor under an elementary abelian 2-group, so there is no
+    // intrinsic first class; they are labelled from L, which FillGenus passes as the
+    // genus's published rep.  The spinor generators q_1 < ... < q_k
+    // (spinor_generators above) are the smallest primes not dividing 2*det, each
+    // kept if it is independent of those before it, which depends only on the genus.  The class with spinor coordinates e in {0,1}^k is reached from L by a
+    // q_i-neighbour step for each e_i = 1 (any q-neighbour: they all lie in the same
+    // spinor genus), and is returned at position 1 + sum e_i 2^(i-1), which becomes its
+    // label.  Magma's SpinorGenera builds the same classes in the same order, except
+    // where its generators start with 2 (and it fails), but the order is computed
+    // here so that the labels do not depend on its implementation.
+    // The lattices themselves can vary from run to run: which neighbour Neighbors
+    // returns first depends on the process's state.
+    // Returns the representatives and the generators.
+    G := Genus(L);
+    gens := spinor_generators(G);
+    // Magma's Neighbours divides out the content with LatticeWithGram, which rejects
+    // an indefinite form ("not positive definite"; Magma 2.30-1), so every genus with
+    // content > 1 and several classes failed to enumerate.  Take neighbours of the
+    // primitive lattice and scale back.
+    c := Content(L);
+    P := [ LatticeWithGram(ChangeRing(GramMatrix(L), Rationals()) / c : CheckPositive := false) ];
+    for idx in [1 .. 2^#gens - 1] do
+        j := Ilog2(idx) + 1;                              // the highest coordinate set
+        Append(~P, CoordinateLattice(Neighbors(P[idx - 2^(j-1) + 1], gens[j])[1]));
+    end for;
+    reps := [L] cat [ LatticeWithGram(ChangeRing(c * GramMatrix(N), Integers()) : CheckPositive := false) : N in P[2..#P] ];
+    assert forall{N : N in reps | Genus(N) eq G};
+    return reps, gens;
 end function;
+
+intrinsic SpinorCoordinates(idx::RngIntElt, k::RngIntElt) -> SeqEnum
+{The spinor coordinates of the class at position idx (counting from 1) of an
+indefinite genus of rank >= 3 with k spinor generators: the 0/1 vector e of length k
+with idx - 1 = sum e_i 2^(i-1).}
+    require idx ge 1 and idx le 2^k : "position out of range";
+    return [ ((idx - 1) div 2^(i-1)) mod 2 : i in [1..k] ];
+end intrinsic;
 
 forward genus_reps_orth;
 
@@ -935,11 +1144,13 @@ satisfy mass >= 5; be wary of reading the threshold as "class number >= 5".}
     return false;
 end intrinsic;
 
-intrinsic GenusReps(L0::Lat : Timeout := 1800, UseOrth := true) -> BoolElt, SeqEnum, Any
+intrinsic GenusReps(L0::Lat : Timeout := 1800, UseOrth := true) -> BoolElt, SeqEnum, Any, Any
 {Enumerate the genus of L0 with the method dispatch used by the LMFDB lattice
 pipeline, under a wall-clock timeout (in seconds).  Returns success, the list of
-representatives (empty on failure), and -- for the orbit method -- the provenance
-<ambient genus label, [<ambient counter, vector>]> (0 when unavailable).
+representatives (empty on failure), -- for the orbit method -- the provenance
+<ambient genus label, [<ambient counter, vector>]> (0 when unavailable), and -- for
+indefinite rank >= 3 -- the spinor generators, in which case the representatives are
+in label order from L0 (see genus_reps_Spinor; 0 otherwise).
 
 Rank-2 lattices of square determinant are handled directly (Magma's
 GenusRepresentatives rejects square discriminants); positive definite lattices of
@@ -959,6 +1170,7 @@ fill batches that still reported failed=0.  Do not drop it in a refactor.}
     posdef := IsPositiveDefinite(Gm);
     negdef := (not posdef) and IsPositiveDefinite(-Gm);
     prov := 0;
+    spinor := 0;
     // Rank-2 lattices of square determinant -m^2 have isotropic (split) forms, on
     // which Magma's GenusRepresentatives fails (it reduces to binary quadratic
     // forms, which reject square discriminants); these are handled directly.  Note
@@ -991,7 +1203,8 @@ fill batches that still reported failed=0.  Do not drop it in a refactor.}
     elif (n ge 3) then
         // Genuinely indefinite rank >= 3: one representative per spinor genus of the
         // genus; each spinor genus is a single isometry class by Eichler.
-        genus_success, reps, elapsed := TimeoutCall(Timeout, genus_reps_Spinor, <L0>, 1 : HardKill := true);
+        genus_success, reps, elapsed := TimeoutCall(Timeout, genus_reps_Spinor, <L0>, 2 : HardKill := true);
+        if genus_success then spinor := reps[2]; end if;
         vprintf GenusReps, 1 : "Genus representatives (spinor genera) computed in %o seconds\n", elapsed;
     else
         // Rank 1-2: neither the definite rank >= 3 methods nor the spinor route
@@ -1003,7 +1216,7 @@ fill batches that still reported failed=0.  Do not drop it in a refactor.}
         if posdef and (n ge 3) and UseOrth then
             prov := reps[2];
         end if;
-        return true, reps[1], prov;
+        return true, reps[1], prov, spinor;
     end if;
-    return false, [], 0;
+    return false, [], 0, 0;
 end intrinsic;

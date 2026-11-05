@@ -36,3 +36,4 @@ This table stores lattices (free Z-modules with a nondegenerate symmetric inner 
 | scale | integer | the gcd of the entries of the Gram matrix for any lattice in this genus |
 | rep | integer[] | a Gram matrix for a lattice within this genus.  Not stored if the lattices in this genus are all in lat_lattices |
 | genus_hash | bigint | a hash value that can be easily computed from a lattice in this genus (should be collision-free) |
+| spinor_generators | integer[] | for indefinite genera of rank at least 3: primes q_1 < ... < q_k whose neighbor steps generate the group acting on the spinor genera (each a single class), chosen greedily -- the smallest primes not dividing 2*det, each kept if independent of the earlier ones (Magma's SpinorGenerators).  The genus has 2^k classes, labelled by spinor_coordinates (lat_lattices) relative to rep.  Null otherwise |

@@ -23,7 +23,10 @@ Label: `dimension.signature.determinant.genus_spec.tiebreaker` where
     - The next 3*c bits represent the oddities of the compartments, with every 3 bits giving an oddity mod 8.
     - The next t bits represent the signs of the trains.
     - Finally, for every other prime p dividing d, in increasing order, if there are n_p non-zero blocks in the Jordan decomposition at p, we add n_p bits representing the signs of these blocks.
-  - For the tiebreaker, we use lexicographic sorting by canonical Gram matrix for definite lattices.  For indefinite lattices, a tiebreaker is only needed in rank 2 or 3 (in rank 3 spinor genera provide a complete invariant).
+  - The tiebreaker is the position of the lattice in its genus (`counter`).
+    - Definite lattices are sorted by automorphism group order (larger first), minimum (larger first), root system (larger first), theta series, dual theta series, and finally Gram matrix; an invariant that could not be computed sorts last.
+    - Indefinite lattices of rank at least 3: by Eichler's theorem the classes of a genus are its spinor genera, which form a torsor under an elementary abelian 2-group.  With the primes q_1 < ... < q_k in `spinor_generators` (lat_genera), the class reached from the genus's `rep` by one q_i-neighbor step for each i with e_i = 1 has tiebreaker 1 + sum e_i 2^(i-1), and `spinor_coordinates` = e.  The class of `rep` is the first; this depends on the choice of `rep`, so it is not canonical.
+    - Indefinite lattices of rank 2 are in the order Magma's `GenusRepresentatives` returns them.
 
 | Column | Type | Description |
 | --- | --- | --- |
@@ -48,7 +51,8 @@ Label: `dimension.signature.determinant.genus_spec.tiebreaker` where
 | [center_density](https://beta.lmfdb.org/knowledge/show/lattice.density) | numeric | density of the lattice centered sphere packing (only for definite lattices) |
 | [covering_norm_num](https://beta.lmfdb.org/knowledge/show/lattice.covering_radius) | integer | numerator of the square of the covering radius, the minimum real number so that balls of this radius around lattice points cover space |
 | [covering_norm_den](https://beta.lmfdb.org/knowledge/show/lattice.covering_radius) | integer | denominator of the square of the covering radius |
-| deep_holes | numeric[] | orbit representatives, under the action of the automorphism group, for the deep holes (the holes at maximal distance from the lattice); coordinates are rational in general |
+| deep_holes | integer[] | orbit representatives, under the action of the automorphism group, for the deep holes (the holes at maximal distance from the lattice); stored as integer numerators: the coordinates of each hole are these divided by deep_holes_den |
+| deep_holes_den | integer | the common denominator of the coordinates in deep_holes (it divides twice the determinant) |
 | deep_hole_count | bigint | the number of deep holes |
 | deep_hole_orbit_count | bigint | the number of orbits of deep holes under the automorphism group |
 | hole_count | bigint | the number of holes (the vertices of the Voronoi cells of the lattice) |
@@ -72,7 +76,7 @@ Label: `dimension.signature.determinant.genus_spec.tiebreaker` where
 | pneighbors | jsonb | a dictionary with primes as keys and a list of labels as values (the p-neighbors) |
 | discriminant_group_invs | integer[] | Smith-style invariants for the discriminant group |
 | discriminant_group_exponent | integer | Exponent of the discriminant group |
-| festi_veniani_index | numeric | the index of the lattice automorphism group within the automorphism group of the discriminant group |
+| festi_veniani_index | numeric | the Festi-Veniani index [O(q_L) : im O(L)]: the index of the image of the automorphism group of L in the orthogonal group of its discriminant form (definite lattices; computed by oscar/fix_festi_veniani.jl) |
 | is_even | boolean | whether the lattice is even |
 | dual_label | text | the label for the rescaled dual lattice (may be null if the discriminant is too large) |
 | dual_theta_series | numeric[] | the theta series of the rescaled dual lattice |
@@ -97,8 +101,9 @@ Label: `dimension.signature.determinant.genus_spec.tiebreaker` where
 | orthogonal_multiplicities | smallint[] | multiplicies of the lattices in the orthogonal decomposition (a list of integers of the same length as orthogonal_factors, in a corresponding order) |
 | tensor_decompositions | jsonb | A list of lists of pairs.  The overall list contains different decompositions as a tensor product; the first entry of each pair is a label and the second a multiplicity. |
 | is_tensor_product | boolean | whether this lattice has a nontrivial decomposition as a tensor product |
-| root_sublattice | text | the name of the root sublattice (e.g. "I4 A2 2E8") |
+| root_sublattice | text | the root system of the sublattice spanned by the vectors of norm 1 and 2, e.g. "I4 A2 2E8": the norm-1 vectors span I_k, and the rest is a sum of irreducible root lattices A_n, D_n, E_n; components in the order I, A, D, E and by increasing rank within a type, with a multiplicity prefix, and "0" when there are no such vectors (only for definite lattices).  It is the third sort key for the label tiebreaker, after the automorphism group size and the minimum |
 | root_complement | text | the label for the orthogonal complement of the root sublattice |
+| spinor_coordinates | smallint[] | for indefinite lattices of rank at least 3: the vector e in {0,1}^k with this lattice reached from the genus's rep by a q_i-neighbor step for each e_i = 1, the q_i being the genus's spinor_generators (lat_genera); its tiebreaker is 1 + sum e_i 2^(i-1).  Null otherwise |
 | even_sublattice | text | the label for the sublattice generated by vectors of even norm |
 | even_complement | text | the label for the orthogonal complement of the even sublattice |
 | norm1_rank | smallint | the rank of the sublattice spanned by vectors of norm 1 |

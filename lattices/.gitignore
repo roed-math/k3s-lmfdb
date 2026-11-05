@@ -26,3 +26,35 @@ tensor_indecomp
 tensor_decomp
 voronoi
 shortest
+genus_jobs_*.txt
+embed_jobs.txt
+embed_labels
+inclusions
+lat_inclusions.tbl
+lat_inclusions.tbl.failed
+orth_cache
+refine_sidecar
+regularity_candidates.txt
+fill_stats
+fill_missing_*.txt
+calibration_sample.txt
+calibration_population.tsv
+
+# benchmark/bench.py output
+bench_results*
+bench_cases*.tsv
+
+# festi_veniani_index (fill sidecar and oscar/fix_festi_veniani.jl jobs)
+festi_veniani
+festi_veniani_jobs
+festi_veniani_jobs.txt
+oscar_genus
+oscar_labels.txt
+oscar_enum.ledger.tsv
+run_provenance.jsonl
+label_lookups
+label_lookups_done
+lookup_labels.txt
+label_lookups.ledger.tsv
+embed_pool
+embed.ledger.tsv

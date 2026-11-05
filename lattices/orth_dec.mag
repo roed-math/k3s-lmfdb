@@ -143,47 +143,144 @@ function split_1(lat)
   return orth_1, orth_lat;
 end function;
 
-function root_string_from_rs(R)
+// Root systems.  The root sublattice of a positive definite lattice L is spanned by
+// its vectors of norm 1 and 2.  The norm-1 vectors span a copy of I_k = Z^k, which
+// splits off L, and a norm-2 vector x outside it is orthogonal to it (if (x, e) = 1
+// for a norm-1 vector e then x - e has norm 1, so x lies in it), so the root
+// sublattice is I_k plus an orthogonal sum of irreducible ADE root lattices, uniquely.  A
+// component is a tuple <type, n> with type one of "I", "A", "D", "E".
+//
+// String form (the root_sublattice column): components in the order I, A, D, E, by
+// increasing n within a type, a multiplicity prefix when it exceeds 1, separated by
+// single spaces -- "I4 A2 2E8".  The empty root system is "0" (the zero lattice),
+// not "": Magma's Split drops empty fields, so an empty string would misalign every
+// record read back with it.
+
+ROOT_TYPES := ["I", "A", "D", "E"];
+
+function root_components(R)
   // Normalise to a degree = rank lattice: R may be an embedded sublattice (e.g. a
   // rank-2 root system inside a rank-3 lattice), and orth_dec's LLL transform
   // produces rank-length coordinates that cannot coerce into a higher-degree
   // ambient.  The root system only depends on the isometry class.
   od := orth_dec(LatticeWithGram(GramMatrix(R)));
-  root_str := "";
+  comps := [];
+  k := 0;   // number of norm-1 components, which together form I_k
   for rl in od do
     if Rank(rl) eq 0 then
-      // a lattice with no roots contributes no component to the root system
       continue;
     elif Rank(rl) eq 1 and Determinant(rl) eq 1 then
-      // a norm-1 vector contributes the rank-1 odd lattice with Gram [1], named Z
-      // (A1 has Gram [2]); it has no Cartan matrix, so append it directly
-      root_str *:= "Z";
+      k +:= 1;
       continue;
+    // An irreducible root lattice is determined by its rank and determinant.
     elif Rank(rl) in [6..8] and Determinant(rl) eq 9-Rank(rl) then
-      str := Sprintf("E%o",Rank(rl));
+      c := <"E", Rank(rl)>;
     elif Rank(rl) ge 4 and Determinant(rl) eq 4 then
-      str := Sprintf("D%o",Rank(rl));
+      c := <"D", Rank(rl)>;
     elif Determinant(rl) eq Rank(rl)+1 then
-      str := Sprintf("A%o",Rank(rl));
+      c := <"A", Rank(rl)>;
     else
       error "unknown root lattice";
     end if;
-    assert IsIsomorphic(rl,LatticeWithGram(CartanMatrix(str)));
-    root_str *:= str;
+    assert IsIsomorphic(rl, LatticeWithGram(CartanMatrix(Sprintf("%o%o", c[1], c[2]))));
+    Append(~comps, c);
   end for;
-  return root_str;
+  if k gt 0 then Append(~comps, <"I", k>); end if;
+  return comps;
 end function;
 
-function root_string(lat : is_rs := false)
-  // Eran: modified the sv according to the knowl for root sublattice.
-  // sv := ShortVectors(lat,2,2);
-  if is_rs then return root_string_from_rs(lat); end if;
-  sv := ShortVectors(lat, 1, 2);
-  sub_2 := LatticeWithGram(GramMatrix(sub<lat|[x[1]: x in sv]>));
-  return root_string_from_rs(sub_2);
+function root_type_index(t)
+  i := Index(ROOT_TYPES, t);
+  error if i eq 0, "unknown root system type", t;
+  return i;
+end function;
+
+function root_components_to_string(comps)
+  if #comps eq 0 then return "0"; end if;
+  keys := Sort([<root_type_index(c[1]), c[2]> : c in comps]);
+  parts := [];
+  i := 1;
+  while i le #keys do
+    j := i;
+    while j lt #keys and keys[j+1] eq keys[i] do j +:= 1; end while;
+    mult := j - i + 1;
+    Append(~parts, (mult gt 1 select IntegerToString(mult) else "")
+                   cat ROOT_TYPES[keys[i][1]] cat IntegerToString(keys[i][2]));
+    i := j + 1;
+  end while;
+  return Join(parts, " ");
 end function;
 
 intrinsic RootString(L::Lat : IsRootSystem := true) -> MonStgElt
-{Return a string representing the root lattice of L.}
-  return root_string(L : is_rs := IsRootSystem);
+{The root system of the positive definite lattice L (of L itself when IsRootSystem,
+else of the sublattice spanned by its vectors of norm 1 and 2), as a string like
+"I4 A2 2E8": components ordered I, A, D, E and by rank within a type, multiplicity
+prefixes, and "0" for the empty root system.}
+  if IsRootSystem then
+    R := L;
+  else
+    sv := ShortVectors(L, 1, 2);
+    R := sub<L | [x[1] : x in sv]>;
+  end if;
+  return root_components_to_string(root_components(R));
+end intrinsic;
+
+intrinsic ParseRootString(s::MonStgElt) -> SeqEnum
+{The components of a root system string (see RootString) as tuples <type, n>, with
+multiplicities expanded.  Only the canonical form RootString produces is accepted.}
+  if s eq "0" then return []; end if;
+  comps := [];
+  for tok in Split(s, " ") do
+    i := 1;
+    while i le #tok and tok[i] in "0123456789" do i +:= 1; end while;
+    require i le #tok and tok[i] in ROOT_TYPES and i lt #tok : "malformed root system string", s;
+    mult := i gt 1 select StringToInteger(tok[1..i-1]) else 1;
+    n := StringToInteger(tok[i+1..#tok]);
+    require mult ge 1 and n ge 1 : "malformed root system string", s;
+    comps cat:= [<tok[i], n> : j in [1..mult]];
+  end for;
+  require root_components_to_string(comps) eq s : "not a canonical root system string", s;
+  return comps;
+end intrinsic;
+
+// Number of vectors of norm 1 or 2 in a component (2k^2 for I_k: 2k of norm 1 and
+// 2k(k-1) of norm 2), and the sort key of a component, larger first.
+function root_count(c)
+  t, n := Explode(c);
+  case t:
+    when "I": return 2*n^2;
+    when "A": return n*(n+1);
+    when "D": return 2*n*(n-1);
+    when "E": return [72, 126, 240][n-5];
+  end case;
+  error "unknown root system type", t;
+end function;
+
+function root_component_key(c)
+  // number of roots, then rank, then type, packed into one integer
+  return (root_count(c) * 2^20 + c[2]) * 8 + root_type_index(c[1]);
+end function;
+
+intrinsic RootCount(s::MonStgElt) -> RngIntElt
+{The number of vectors of norm 1 or 2 in a lattice with root system s (see RootString).}
+  return &+[Integers() | root_count(c) : c in ParseRootString(s)];
+end intrinsic;
+
+intrinsic CompareRootStrings(s1::MonStgElt, s2::MonStgElt) -> RngIntElt
+{Negative if root system s1 sorts before s2, positive if after, 0 if they are equal.
+Larger root systems first: more roots (vectors of norm 1 or 2), then larger rank,
+then the components compared largest first, each by number of roots, rank and then
+type (E, D, A, I).  This is a total order on root systems.}
+  c1 := ParseRootString(s1);
+  c2 := ParseRootString(s2);
+  d := &+[Integers() | root_count(c) : c in c2] - &+[Integers() | root_count(c) : c in c1];
+  if d ne 0 then return d; end if;
+  d := &+[Integers() | c[2] : c in c2] - &+[Integers() | c[2] : c in c1];
+  if d ne 0 then return d; end if;
+  k1 := Reverse(Sort([root_component_key(c) : c in c1]));
+  k2 := Reverse(Sort([root_component_key(c) : c in c2]));
+  for i in [1..Minimum(#k1, #k2)] do
+    if k1[i] ne k2[i] then return k2[i] - k1[i]; end if;
+  end for;
+  return #k2 - #k1;
 end intrinsic;

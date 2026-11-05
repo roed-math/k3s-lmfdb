@@ -412,18 +412,35 @@ def genus_symbol_from_label(label):
     >>> all_syms = all_genus_symbols(8,0,2**5*3**4*5**3*7**2,only_even=False)
     >>> all([genus_symbol_from_label(create_genus_label(s)) == s for s in all_syms])
     True
+
+    Labels omit the Jordan-rank field of a prime p with v_p(det) <= 1, and field 2 is
+    n_plus, so indefinite genera and squarefree parts round-trip too:
+
+    >>> syms = [s for d in [-2, -6, -12, -30, -45] for s in all_genus_symbols(3, 1, d, only_even=False)]
+    >>> all([genus_symbol_from_label(create_genus_label(s)) == s for s in syms])
+    True
     '''
     split_label = label.split(".")
     rk = ZZ(split_label[0])
-    sig = ZZ(split_label[1])
-    n_plus = (rk + sig) // 2
-    n_minus = (rk - sig) // 2
+    n_plus = ZZ(split_label[1])     # field 2 is n_plus (see create_genus_label)
+    n_minus = rk - n_plus
     det = ZZ(split_label[2])
     primes = (2*det).prime_divisors()
     symbols = []
-    for i,p in enumerate(primes):
-        rank_dec = [decode_rank(c) for c in split_label[3+i]]
-        rank_dec = [rk - sum(rank_dec)] + rank_dec
+    # A Jordan-rank field is present only for primes with v_p(det) > 1; otherwise the
+    # Jordan structure is determined: rank rk at scale 1 (v_p = 0, i.e. p = 2 with det
+    # odd), or rk - 1 at scale 1 plus 1 at scale p (v_p = 1).
+    jidx = 0
+    for p in primes:
+        vp = det.valuation(p)
+        if vp > 1:
+            jidx += 1
+            rank_dec = [decode_rank(c) for c in split_label[2 + jidx]]
+            rank_dec = [rk - sum(rank_dec)] + rank_dec
+        elif vp == 1:
+            rank_dec = [rk - 1, 1]
+        else:
+            rank_dec = [rk]
         symbols_p = [[i, rank_dec[i], 1] for i in range(len(rank_dec)) if rank_dec[i] > 0]
         symbols.append(symbols_p)
 
@@ -431,7 +448,7 @@ def genus_symbol_from_label(label):
     symbols[0] = [s + [0,0] for s in symbols[0]]
     num_blocks_2 = len(symbols[0])
     
-    local_data = ZZ(split_label[3 + len(primes)], base=16)
+    local_data = ZZ(split_label[3 + jidx], base=16)
 
     compart_bits = (local_data % (1 << num_blocks_2)).digits(2, padto=num_blocks_2)
 
@@ -835,7 +852,7 @@ def write_all_of_sig_between(n_plus, n_minus, lb_det, ub_det):
         entries = [create_genus_entry(s) for s in syms]
         write_entries_to_file(entries, fname)
 
-@parallel(ncpus=128) # !!! change this according to platform
+@parallel(ncpus=128) # run_all.py rewraps .func with ncpus=-j; this default only applies to direct callers
 def write_all_of_sig_between_genera_basic(n_plus, n_minus, lb_det, ub_det):
     '''
     Create data files with all genera of a certain signature with determinant between lb_det and ub_det,

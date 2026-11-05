@@ -175,6 +175,33 @@ def main():
         rec2 = (sc2 / "2" / "2" / "2.2.1.a.1").read_text().strip().split("|")
         assert rec2[4] == "\\N", rec2
 
+        # ---- chunked stage (expected_jobs.txt): rank-1 domains in two det-sorted
+        # ---- chunks, the second starting at det 9
+        emb2 = Path(d) / "embed_labels2"
+        man2 = Path(d) / "data2"
+        emb2.mkdir()
+        jobs = [("overlat_rank1_all.c0001", 1), ("overlat_rank1_all.c0002", 9),
+                ("corank1_rank1_all.c0001", 1), ("corank1_rank1_all.c0002", 9)]
+        (emb2 / "expected_jobs.txt").write_text("".join(f"{j}\t{m}\n" for j, m in jobs))
+        for j, _ in jobs:
+            (man2 / j).mkdir(parents=True)
+            (man2 / j / "manifest.txt").write_text("task=x loaded=2 skipped=0 inputs=ab seconds=1.0\n")
+        cc = derive_certificates(emb2, man2, C, [1, 2])
+        assert cc[("overlat", 1)] == 64 and cc[("c1dom", 1)] == 64 and cc[("c1cod", 2)] == 32, cc
+        # the second corank-1 chunk did not finish: domains from det 9 up are
+        # uncertified, but the first chunk (and the codomain pool it loaded) still is
+        (man2 / "corank1_rank1_all.c0002" / "manifest.txt").unlink()
+        cc2 = derive_certificates(emb2, man2, C, [1, 2])
+        assert cc2[("c1dom", 1)] == 8 and cc2[("c1cod", 2)] == 32 and cc2[("overlat", 1)] == 64, cc2
+        # a loader skip in a finished chunk still caps the bound
+        (man2 / "overlat_rank1_all.c0001" / "manifest.txt").write_text(
+            "task=overlat loaded=1 skipped=1 inputs=ab seconds=1.0\n1.1.5.a.1\n")
+        assert derive_certificates(emb2, man2, C, [1, 2])[("overlat", 1)] == 4
+        # no chunk finished: nothing certified, codomain included
+        (man2 / "corank1_rank1_all.c0001" / "manifest.txt").unlink()
+        cc3 = derive_certificates(emb2, man2, C, [1, 2])
+        assert cc3[("c1dom", 1)] == -1 and cc3[("c1cod", 2)] == -1, cc3
+
     print("refine_universality synthetic test: OK")
 
 

@@ -31,7 +31,8 @@ for label -> D in decomp do
         end for;
         labs := [k : k->v in ctr];
         SortLabels(~labs);
-        Append(~s, Join([Sprintf("[%o,%o]", lab, ctr[lab]) : lab in labs], ","));
+        // labels quoted: the column is jsonb, and [[[2.2.1.5.1,1]]] is not JSON
+        Append(~s, Join([Sprintf("[\"%o\",%o]", lab, ctr[lab]) : lab in labs], ","));
     end for;
     Dstr := "[[" * Join(s, "],[") * "]]";
     Write(dname, Sprintf("%o|%o|t", label, Dstr));
