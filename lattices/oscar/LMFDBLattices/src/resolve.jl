@@ -13,6 +13,13 @@
 # separated, empty for "every class").  The task finds the one candidate isometric
 # to the lattice and writes its label into that column of the source lattice's
 # advanced record (lattice_advanced_data), atomically.
+#
+# Column `orthogonal_factors` is the exception: connect writes one such line per
+# orthogonal summand (a summand it could label has that label as its only
+# candidate), and the factor list and multiplicities are written only once every
+# summand is labelled, sorted and grouped as connect does (LatSortKey: rank, nplus
+# descending, det, label).  run_all.py runs this between the two connect passes,
+# so the second pass derives the decomposable fields from them.
 
 const GENUS_CLASSES = Dict{String, Union{Nothing, Vector{ZZLat}}}()   # per worker
 const FORMATS = Ref{Union{Nothing, PipelineFormats}}(nothing)
@@ -50,6 +57,8 @@ function resolve_task(source::AbstractString, root::AbstractString)
     length(fields) == length(adv) || error("$path: $(length(fields)) fields, lat_advanced.format has $(length(adv))")
     resolved = unresolved = 0
     problems = String[]
+    factors = String[]                  # orthogonal_factors lookups, labelled
+    factor_lines = 0
     for line in eachline(label_path(root, "label_lookups", source))
         isempty(line) && continue
         parts = split(line, "|")
@@ -57,6 +66,7 @@ function resolve_task(source::AbstractString, root::AbstractString)
         cands = length(parts) >= 4 && !isempty(parts[4]) ? Set(split(parts[4], ",")) : nothing
         ci = findfirst(==(col), adv)
         ci === nothing && error("$source: unknown column $col")
+        col == "orthogonal_factors" && (factor_lines += 1)
         Ls = genus_classes(root, genus)
         if Ls === nothing                                  # not all classes stored
             unresolved += 1
@@ -69,8 +79,17 @@ function resolve_task(source::AbstractString, root::AbstractString)
             push!(problems, "$col:$(length(hits))_of_$(length(pool))_candidates_in_$genus")
             continue
         end
+        if col == "orthogonal_factors"
+            push!(factors, get_attribute(hits[1], :lmfdb_label))
+            continue
+        end
         fields[ci] = get_attribute(hits[1], :lmfdb_label)
         resolved += 1
+    end
+    if factor_lines > 0 && length(factors) == factor_lines
+        fields[findfirst(==("orthogonal_factors"), adv)], fields[findfirst(==("orthogonal_multiplicities"), adv)] =
+            factor_columns(factors)
+        resolved += factor_lines
     end
     if resolved > 0
         lines[1] = join(fields, "|")
@@ -79,4 +98,13 @@ function resolve_task(source::AbstractString, root::AbstractString)
     status = isempty(problems) ? "ok" : "error"
     return "status=$status seconds=$(round(time() - t0; digits = 3)) resolved=$resolved unresolved=$unresolved" *
            (isempty(problems) ? "" : " error=" * join(problems, ";")) * "\n"
+end
+
+# The orthogonal_factors and orthogonal_multiplicities values for these summand
+# labels, as connect writes them: CountFibers by LatSortKey, i.e. the distinct labels
+# sorted by (rank, -nplus, det, label) with their counts.
+function factor_columns(labels::Vector{String})
+    key(l) = (p = split(l, "."); (parse(Int, p[1]), -parse(Int, p[2]), parse(BigInt, p[3]), l))
+    distinct = sort(unique(labels); by = key)
+    return "{" * join(distinct, ",") * "}", "{" * join([count(==(l), labels) for l in distinct], ",") * "}"
 end

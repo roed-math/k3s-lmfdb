@@ -891,14 +891,13 @@ def main():
             parallel("genus_jobs.txt", "connect1.joblog",
                      ["labels:={1}", "phase:=1", f"memlimit:={args.memlimit}",
                       f"stats:={1 if args.connect_stats else 0}", "run_connect_genus.m"])
-        with timed("Connecting genera (pass 2: consume)"):
-            parallel("genus_jobs.txt", "connect2.joblog",
-                     ["labels:={1}", "phase:=2", f"memlimit:={args.memlimit}",
-                      f"stats:={1 if args.connect_stats else 0}", "run_connect_genus.m"])
         # Lookups FindLabel could not decide -- an indefinite genus of rank >= 3 with
         # several classes, or a Magma overrun hashing a lattice or testing isometry --
-        # are recorded in label_lookups/ by connect; the Oscar pool's resolve task
-        # tests them with is_isometric and patches the advanced records.
+        # are recorded in label_lookups/ by pass 1; the Oscar pool's resolve task tests
+        # them with is_isometric and patches the advanced records.  It runs before pass
+        # 2, which derives a decomposable lattice's fields (and its name) from its
+        # orthogonal factors, some of which only the resolver labels; pass 2 reads and
+        # rewrites the patched records, so the patches survive.
         lookups = Path("label_lookups")
         sources = sorted(f.name for f in lookups.rglob("*") if f.is_file()) if lookups.is_dir() else []
         if sources:
@@ -918,6 +917,10 @@ def main():
                                     "--memlimit", str(args.oscar_memlimit), "--batch", str(args.oscar_batch),
                                     "--data-root", ".", "--out-root", "label_lookups_done",
                                     "--ledger", "label_lookups.ledger.tsv"], env=julia_env())
+        with timed("Connecting genera (pass 2: consume)"):
+            parallel("genus_jobs.txt", "connect2.joblog",
+                     ["labels:={1}", "phase:=2", f"memlimit:={args.memlimit}",
+                      f"stats:={1 if args.connect_stats else 0}", "run_connect_genus.m"])
 
 if __name__ == "__main__":
     try:

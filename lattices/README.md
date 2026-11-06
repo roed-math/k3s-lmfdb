@@ -88,10 +88,11 @@ pipe-separated columns of the corresponding records.
    Magma lacks), or where hashing or Magma's isometry test overran -- are
    recorded in `label_lookups/` with their candidate classes, and the Oscar
    pool's `resolve` task ([`oscar/LMFDBLattices/src/resolve.jl`](oscar/LMFDBLattices/src/resolve.jl))
-   fills them in afterwards with `is_isometric`.  This covers `dual_label`,
-   `primitive_scaling`, `even_sublattice`, `norm1_complement` and
-   `root_complement`; lookups for orthogonal factors and from tensor/names stay
-   null.
+   fills them in with `is_isometric` between the two connect passes.  This covers
+   `dual_label`, `primitive_scaling`, `even_sublattice`, `norm1_complement`,
+   `root_complement` and the orthogonal factors (once every summand is labelled,
+   the resolver writes the factor list and multiplicities, and pass 2 derives the
+   decomposable fields and name from them); lookups from tensor/names stay null.
 7. **Embeddings** (Julia/Oscar, the Oscar worker pool's `embed` task,
    [`oscar/LMFDBLattices/src/embed.jl`](oscar/LMFDBLattices/src/embed.jl);
    [`oscar/driver.jl`](oscar/driver.jl) runs one job by hand; design in

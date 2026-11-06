@@ -206,6 +206,20 @@ the returned label is final.}
     return found[label_pos], "";
 end intrinsic;
 
+intrinsic OrthogonalFactorLookups(labels::SeqEnum[MonStgElt], defer::SeqEnum[MonStgElt]) -> SeqEnum
+{The orthogonal summands' FindLabel results (labels[i], defer[i]) -> the genus fields of
+their orthogonal_factors lookups for the Oscar resolver, one per summand in order: the
+deferral itself for a summand FindLabel left to Oscar, and "genus;label" (its own
+label as the only candidate) for a labelled one.  Empty when nothing was deferred, or
+when some summand's label is final null (its genus is not stored), since then the
+factor list cannot be completed.}
+    if forall{d : d in defer | d eq ""} or exists{i : i in [1 .. #labels] | defer[i] eq "" and labels[i] eq "\\N"} then
+        return [Parent("") | ];
+    end if;
+    genus := func<l | Join(Split(l, ".")[1 .. #Split(l, ".") - 1], ".")>;
+    return [defer[i] ne "" select defer[i] else genus(labels[i]) * ";" * labels[i] : i in [1 .. #labels]];
+end intrinsic;
+
 intrinsic LatSortKey(label::MonStgElt) -> Tup
 {A tuple that sorts how we want lattices to sort}
     // A summand not found in the database (e.g. out of range) has label "\N";
@@ -798,6 +812,7 @@ data (now guaranteed on disk) and patch them into the lattice's advanced record.
     s := StringToInteger(sl[2]);
     if s ne n then return; end if;   // indefinite: no definite geometry to derive
     ii := Index(advanced_format, "is_indecomposable");
+    name_i := Index(advanced_format, "name");
     of_i := Index(advanced_format, "orthogonal_factors");
     om_i := Index(advanced_format, "orthogonal_multiplicities");
     // The fields DeriveDecomposableFields fills in for a decomposable lattice.
@@ -811,6 +826,7 @@ data (now guaranteed on disk) and patch them into the lattice's advanced record.
         fields := SplitPipe(Split(Read(path), "\n")[1]);   // first line, empties preserved
         error if #fields ne #advanced_format, "advanced record field count mismatch for", lats[i]["label"];
         if fields[ii] ne "false" then continue; end if;   // only decomposable lattices
+        if fields[of_i] eq "\\N" then continue; end if;   // factors left unlabelled (pass 1 or the Oscar resolver)
         lat := AssociativeArray();
         lat["orthogonal_factors"] := ParsePGList(fields[of_i]);
         lat["orthogonal_multiplicities"] := [ StringToInteger(x) : x in ParsePGList(fields[om_i]) ];
@@ -819,6 +835,12 @@ data (now guaranteed on disk) and patch them into the lattice's advanced record.
         for k in derived do
             fields[Index(advanced_format, k)] := Sprintf("%o", to_postgres(lat[k]));
         end for;
+        // A name pass 1 could not compose: its factors were labelled only by the
+        // Oscar resolver (which runs between the passes), or a factor had no name yet.
+        if fields[name_i] eq "\\N" then
+            if not assigned atomic_names then atomic_names := LoadAtomicNames(); end if;
+            fields[name_i] := LatticeName(lats[i]["label"], lat["orthogonal_factors"], lat["orthogonal_multiplicities"], atomic_names, name_i);
+        end if;
         Write(path, Join(fields, "|") : Overwrite);
     end for;
 end intrinsic;
@@ -1076,12 +1098,31 @@ two-pass connect in run_all.py).}
         if ok then
             summands := [LatticeWithGram(Matrix(Integers(), Isqrt(#g), Isqrt(#g), g)) : g in og[1]];
             lat["is_indecomposable"] := (#summands eq 1);
-            summand_labels := [FindLabel(M : Timeout := timeout) : M in summands];
-            collected := CountFibers(summand_labels, func<x | LatSortKey(x)>);   // CountFibers wants a UserProgram, not an intrinsic
-            lat["orthogonal_factors"] := [fib[1][4] : fib in collected];
-            lat["orthogonal_multiplicities"] := [fib[2] : fib in collected];
-            lat["name"] := LatticeName(lat["label"], lat["orthogonal_factors"],
-                                       lat["orthogonal_multiplicities"], atomic_names, name_i);
+            summand_labels := [];
+            summand_defer := [];
+            for M in summands do
+                slab, sgenus := FindLabel(M : Timeout := timeout);
+                Append(~summand_labels, slab);
+                Append(~summand_defer, sgenus);
+            end for;
+            factor_lookups := OrthogonalFactorLookups(summand_labels, summand_defer);
+            if #factor_lookups gt 0 then
+                // Some factor's label is left to Oscar (FindLabel overran): the
+                // resolver rebuilds the lists once every summand is labelled, and pass
+                // 2 then derives the decomposable fields.
+                for i in [1 .. #summands] do
+                    Append(~deferred, <"orthogonal_factors", factor_lookups[i], summands[i]>);
+                end for;
+                lat["orthogonal_factors"] := "\\N";
+                lat["orthogonal_multiplicities"] := "\\N";
+                lat["name"] := IsDefined(atomic_names, lat["label"]) select atomic_names[lat["label"]] else "\\N";
+            else
+                collected := CountFibers(summand_labels, func<x | LatSortKey(x)>);   // CountFibers wants a UserProgram, not an intrinsic
+                lat["orthogonal_factors"] := [fib[1][4] : fib in collected];
+                lat["orthogonal_multiplicities"] := [fib[2] : fib in collected];
+                lat["name"] := LatticeName(lat["label"], lat["orthogonal_factors"],
+                                           lat["orthogonal_multiplicities"], atomic_names, name_i);
+            end if;
         else
             // The decomposition timed out: is_indecomposable and the factors stay "\N",
             // and so does everything below that depends on them.
@@ -1166,7 +1207,7 @@ two-pass connect in run_all.py).}
                 end if;
                 SaveSVdat(lat);
             end if;
-        elif lat["is_indecomposable"] cmpeq false and derive_decomposable then
+        elif lat["is_indecomposable"] cmpeq false and derive_decomposable and lat["orthogonal_factors"] cmpne "\\N" then
             // Consumer step: derive this decomposable lattice's fields from its
             // orthogonal factors' data.  Skipped when derive_decomposable is false
             // (the "produce" pass), which leaves those fields "\N" for a later
