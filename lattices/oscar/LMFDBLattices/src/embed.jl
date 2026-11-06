@@ -9,6 +9,18 @@
 
 # ---- the pipeline's writers (differ from the vendored ones; see each) ----
 
+# Volume guard (INTEGRATION_PLAN.md, "Volume guards"): the writers count the rows of
+# the domain genus being processed, and past ROW_CAP throw EmbedOverflow before
+# writing; embed_job then drops that genus's rows and records it as overflowed
+# rather than write an unbounded payload or truncate it silently.
+struct EmbedOverflow <: Exception end
+const ROW_COUNT = Ref(0)
+const ROW_CAP = Ref(typemax(Int))
+function count_row!()
+    ROW_COUNT[] >= ROW_CAP[] && throw(EmbedOverflow())
+    ROW_COUNT[] += 1
+end
+
 function _inclusion_file(out_root::String, domain_label::AbstractString, fname::String)
     parts = split(domain_label, ".")
     dir = joinpath(out_root, String(parts[1]), String(parts[2]), String(domain_label))
@@ -21,6 +33,7 @@ function save_data_lmfdb(
   _save_path::String,
   x::Tuple{String, String, ZZMatrix},
 )
+  count_row!()
   _path = _inclusion_file(_save_path, x[2], "prim_emb.txt")
   str = x[1] * "_["
   v = x[3]
@@ -41,6 +54,7 @@ function save_data_lmfdb(
   _save_path::String,
   x::Tuple{String, String, Hecke.IntegerUnion, Vector{FqFieldElem}},
 )
+  count_row!()
   _path = _inclusion_file(_save_path, x[1], "overlat.txt")
   str = x[2] * "_$(x[3])_["
   v = x[4]
@@ -61,6 +75,7 @@ function save_data_lmfdb(
   _save_path::String,
   x::Tuple{String, Int},
 )
+  count_row!()
   _path = _inclusion_file(_save_path, x[1], "k3_embed.txt")
   open(_path, "w") do f
     write(f, "$(x[2])")
@@ -243,10 +258,14 @@ function _prime_index_overlattices_pool(
   return nothing
 end
 
+# The row cap is part of a job's inputs: a job committed under another cap may
+# have dropped (or kept) different domains.  run_all.py computes the same digest.
+row_cap(opts) = parse(Int, get(opts, "max-rows-per-domain", "0"))
+
 function inputs_digest(opts)
     files = [opts["labels-file"]]
     haskey(opts, "labels-file2") && opts["labels-file2"] != "-" && push!(files, opts["labels-file2"])
-    return bytes2hex(sha1(join([read(f, String) for f in files], "\0")))
+    return bytes2hex(sha1(join([read(f, String) for f in files], "\0") * "\0rowcap=$(row_cap(opts))"))
 end
 
 # The first manifest line is "key=value key=value ..."; return the value of key.
@@ -328,8 +347,7 @@ function embed_job(opts::Dict{String, String})
         pool_labels = filter(!isempty, strip.(readlines(opts["labels-file2"])))
         pool, pool_skipped = load_genera(root, String.(pool_labels))
         mine = Set(labels)
-        glab(G) = join(split(String(get_attribute(first(get_attribute(G, :representatives)), :lmfdb_label)), ".")[1:end-1], ".")
-        Gs = filter(G -> glab(G) in mine, pool)
+        Gs = filter(G -> domain_label(G) in mine, pool)
         # skipped: this chunk's unloadable domains plus the pool's other ones
         # (overlattices into those genera cannot be labelled)
         skipped = pool_skipped
@@ -337,25 +355,54 @@ function embed_job(opts::Dict{String, String})
         Gs, skipped = load_genera(root, String.(labels))
     end
     n_skipped = length(skipped)
-    if task == "overlat"
-        isempty(Gs) || _prime_index_overlattices_pool(Gs, has_pool ? pool : Gs, out)
-    elseif task == "k3"
-        isempty(Gs) || _embeddings_in_K3_lattice(Gs, out)
-    elseif task == "corank1"
+    skipped2 = String[]
+    if task == "corank1"
         labels2 = filter(!isempty, strip.(readlines(opts["labels-file2"])))
         G1s, skipped2 = load_genera(root, String.(labels2))
         n_skipped += length(skipped2)
-        if !isempty(Gs) && !isempty(G1s)
-            # loop the per-genus method ourselves: the vendored Vector{ZZGenus}
-            # wrapper append!s the per-genus return value, which is `nothing`
-            # (data is written through save_data_lmfdb), and crashes
-            for G2 in Gs
-                _primitive_embeddings_lmfdb(G1s, G2, out)
-                GC.gc()
-            end
-        end
-    else
+    elseif task ∉ ("overlat", "k3")
         error("unknown task $task (expected overlat, k3 or corank1)")
+    end
+    # One unit per domain genus (the vendored routines loop over their genera
+    # independently, so calling them on one genus at a time changes nothing): its
+    # wall time and row count go to units.jsonl, and a genus over the row cap has
+    # its rows removed and is listed as overflowed.
+    cap = row_cap(opts)
+    ledger = String[]
+    overflowed = String[]
+    loaded = Set(domain_label.(Gs))
+    for l in labels
+        l in loaded || push!(ledger, unit_json(task, l, 0, 0.0, 0, "skipped"))   # not loadable
+    end
+    for G in Gs
+        ROW_COUNT[] = 0
+        ROW_CAP[] = cap > 0 ? cap : typemax(Int)
+        t = time()
+        status = "ok"
+        try
+            if task == "overlat"
+                _prime_index_overlattices_pool([G], has_pool ? pool : Gs, out)
+            elseif task == "k3"
+                _embeddings_in_K3_lattice([G], out)
+            elseif !isempty(G1s)
+                # (the vendored Vector{ZZGenus} wrapper append!s the per-genus return
+                # value, which is `nothing`, and crashes; so loop ourselves)
+                _primitive_embeddings_lmfdb(G1s, G, out)
+            end
+        catch e
+            e isa EmbedOverflow || rethrow()
+            status = "overflow"
+            for M in get_attribute(G, :representatives)
+                rm(dirname(_inclusion_file(out, String(get_attribute(M, :lmfdb_label)), "x")); recursive = true, force = true)
+            end
+            push!(overflowed, domain_label(G))
+        end
+        push!(ledger, unit_json(task, domain_label(G), length(get_attribute(G, :representatives)), time() - t, ROW_COUNT[], status))
+        ROW_CAP[] = typemax(Int)
+        task == "corank1" && GC.gc()
+    end
+    open(joinpath(stage, "units.jsonl"), "w") do f
+        foreach(l -> println(f, l), ledger)
     end
     # Completion manifest, staged with the data: its presence in data/<jobtag>/
     # certifies that every loaded genus of this job was fully processed.  The
@@ -364,21 +411,26 @@ function embed_job(opts::Dict{String, String})
     # smallest skipped genus.
     open(joinpath(stage, "manifest.txt"), "w") do f
         # (fields after skipped= are informational; readers take lines 2.. as labels)
-        write(f, "task=$task loaded=$(length(Gs)) skipped=$(n_skipped) inputs=$digest seconds=$(round(time() - t0; digits = 1))\n")
-        for s in skipped
+        # An overflowed domain is listed with the skipped ones: its rows are not in
+        # the table, so the certificates must stop below its det as for a genus the
+        # loader could not load.
+        write(f, "task=$task loaded=$(length(Gs)) skipped=$(n_skipped + length(overflowed)) inputs=$digest " *
+                 "seconds=$(round(time() - t0; digits = 1)) overflow=$(length(overflowed)) rowcap=$cap\n")
+        for s in [skipped; skipped2; overflowed]
             write(f, s, "\n")
-        end
-        if task == "corank1"
-            for s in skipped2
-                write(f, s, "\n")
-            end
         end
     end
     mkpath(dirname(committed))
     ispath(committed) && rm(committed; recursive = true)
     mv(stage, committed)
-    return "DONE genera=$(length(Gs)) skipped=$(n_skipped)"
+    return "DONE genera=$(length(Gs)) skipped=$(n_skipped) overflow=$(length(overflowed))"
 end
+
+domain_label(G) = join(split(String(get_attribute(first(get_attribute(G, :representatives)), :lmfdb_label)), ".")[1:end-1], ".")
+
+# one units.jsonl line (the labels and statuses need no JSON escaping)
+unit_json(task, label, classes, seconds, rows, status) =
+    "{\"task\":\"$task\",\"domain\":\"$label\",\"classes\":$classes,\"seconds\":$(round(seconds; digits = 3)),\"rows\":$rows,\"status\":\"$status\"}"
 
 
 const EMBED_JOBS = Dict{String, Dict{String, String}}()
@@ -387,16 +439,17 @@ const EMBED_JOBS = Dict{String, Dict{String, String}}()
     embed_task(jobtag, root) -> String
 
 Pool task: run the embedding job `jobtag` listed in embed_labels/jobs.tsv
-(jobtag, task, labels file, second labels file or "-"; written by run_all.py's
-build_embedding_inputs).  The job commits its output atomically under
+(jobtag, task, labels file, second labels file or "-", row cap per domain genus or
+0 for none; written by run_all.py's build_embedding_inputs).  The job commits its output atomically under
 inclusions/data/<jobtag>/ (embed_job); the pool record only reports the outcome.
 """
 function embed_task(jobtag::AbstractString, root::AbstractString)
     if !haskey(EMBED_JOBS, jobtag)
         for line in eachline(joinpath(root, "embed_labels", "jobs.tsv"))
             f = split(line, "\t")
-            length(f) == 4 || continue
+            length(f) in (4, 5) || continue
             EMBED_JOBS[f[1]] = Dict("task" => f[2], "labels-file" => f[3], "labels-file2" => f[4],
+                                    "max-rows-per-domain" => length(f) == 5 ? f[5] : "0",
                                     "data-root" => String(root), "out-root" => joinpath(root, "inclusions"))
         end
     end
@@ -410,7 +463,7 @@ end
     embed_cli(args) -> Int
 
 oscar/driver.jl's command line: --task T --labels-file F [--labels-file2 F2]
-[--data-root .] [--out-root inclusions].
+[--max-rows-per-domain N] [--data-root .] [--out-root inclusions].
 """
 function embed_cli(args)
     opts = parse_args(args)

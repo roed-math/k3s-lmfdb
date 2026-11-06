@@ -108,8 +108,14 @@ pipe-separated columns of the corresponding records.
    into det-sorted chunks of `--embed-chunk`, one job each; a finished job is
    committed atomically, so a timeout loses one chunk, and rerunning without
    `--clean` (e.g. `--skip-list-genera --skip-enumerate-genera`) computes only
-   the jobs that did not finish.  Skipped with a warning if the
-   Julia/Oscar environment is not set up.
+   the jobs that did not finish.  Each committed job also holds `units.jsonl`,
+   one line per domain genus (task, classes, seconds, rows, status), merged into
+   `embed_units.jsonl` after the stage for calibration.  Volume guard: a domain
+   genus producing more than `--embed-max-rows-per-domain` rows (default 10^4)
+   has its rows dropped and is reported as overflowed (by `run_all.py` and
+   `write_table.jl`); its job's manifest lists it with the unloadable genera, so
+   the universality certificates stop below its det.  Skipped with a warning if
+   the Julia/Oscar environment is not set up.
 8. **Refine** (Python, [`oscar/refine_universality.py`](oscar/refine_universality.py),
    inline in `run_all.py`): a bottom-up bitset pass over the embedding poset —
    each rank-n lattice gets a distinct power of two, masks are OR-ed up the

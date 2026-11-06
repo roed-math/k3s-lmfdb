@@ -131,6 +131,22 @@ function main()
         end
     end
     println("wrote $rows rows to $(opts["out"])")
+    # Domains dropped by the volume guard (embed.jl, --embed-max-rows-per-domain):
+    # their rows are not in the table, so say so before anything is uploaded.
+    overflowed = String[]
+    data = joinpath(root, "data")
+    for jdir in (isdir(data) ? sort(readdir(data; join = true)) : String[])
+        u = joinpath(jdir, "units.jsonl")
+        isfile(u) || continue
+        for line in eachline(u)
+            m = match(r"\"domain\":\"([^\"]*)\".*\"status\":\"overflow\"", line)
+            m === nothing || push!(overflowed, string(basename(jdir), ": ", m[1]))
+        end
+    end
+    if !isempty(overflowed)
+        println("WARNING: $(length(overflowed)) domain genera overflowed the row cap and are not in the table: ",
+                join(overflowed[1:min(10, end)], "; "), length(overflowed) > 10 ? "; ..." : "")
+    end
     if !isempty(dangling)
         println("ERROR: $(length(dangling)) referenced labels have no lattice file, e.g. ",
                 join(unique(dangling)[1:min(5, end)], ", "))

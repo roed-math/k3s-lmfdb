@@ -87,6 +87,7 @@ parser.add_argument("--embed-max-disc-ratio", type=int, default=0, help="Determi
 parser.add_argument("--embed-k3-min-rank", type=int, default=12, help="Lowest rank for the k3 task: the orthogonal complement inside the rank-22 K3 lattice has rank 22-n, and Oscar's embedding machinery has to enumerate its genus, which explodes as n decreases")
 parser.add_argument("--embed-chunk", type=int, default=200, help="Domain genera per embedding job.  Each task's domain genera are det-sorted and split into chunks of this size, one GNU parallel job each, so a timeout or OOM loses one chunk (and caps the completeness certificate just below that chunk's smallest det) instead of a whole rank or rank pair.  Finished chunks are committed atomically and skipped on a rerun without --clean.  Each job pays a fixed cost -- Julia/Oscar startup and compilation, plus loading its codomain or overlattice pool -- measured at ~270s per job on a loaded 32-core machine (94 chunks of 25 at R=4, D=120 cost 3.8x the 7 unchunked jobs in total job time), so keep chunks at well over that much work.")
 parser.add_argument("--embed-memlimit", type=float, default=16, help="Memory cap in GB per Oscar worker in the embedding stage; a job over it has its worker killed and replaced and its chunk stays uncommitted.")
+parser.add_argument("--embed-max-rows-per-domain", type=int, default=10000, help="Volume guard: a domain genus whose embedding task produces more rows than this has its rows dropped and is listed as overflowed (in its job's units.jsonl and manifest, which also stops the universality certificates below its det) rather than writing an unbounded payload; 0 = no cap.  Changing it reruns every embedding job.")
 parser.add_argument("--embed-timelimit", type=int, default=3600, help="Wall-clock seconds per embedding job; the Oscar pool kills and replaces a worker whose job overruns it, and only that chunk stays uncommitted")
 
 # Skip stages
@@ -353,7 +354,7 @@ def build_embedding_inputs(fname):
         "".join(f"{jobtag(t, p)}\t{m}\n" for t, p, _, m in jobs))
     # every job's inputs, for the pool's embed task (LMFDBLattices/src/embed.jl)
     (labels_dir / "jobs.tsv").write_text(
-        "".join(f"{jobtag(t, p)}\t{t}\t{p}\t{p2}\n" for t, p, p2, _ in jobs))
+        "".join(f"{jobtag(t, p)}\t{t}\t{p}\t{p2}\t{args.embed_max_rows_per_domain}\n" for t, p, p2, _ in jobs))
     # Resume: the driver commits each finished job atomically to
     # inclusions/data/<jobtag>/ with the sha1 of its inputs in the manifest.  Keep
     # those, drop committed jobs this run does not expect (a different chunking or
@@ -369,8 +370,9 @@ def build_embedding_inputs(fname):
     total = done = 0
     with open(fname, "w") as Fout:
         for t, p, p2, _ in jobs:
-            digest = hashlib.sha1("\0".join(Path(f).read_text() for f in [p, p2] if f != "-")
-                                  .encode()).hexdigest()
+            # the same digest as embed.jl's inputs_digest: the label lists and the row cap
+            digest = hashlib.sha1(("\0".join(Path(f).read_text() for f in [p, p2] if f != "-")
+                                   + f"\0rowcap={args.embed_max_rows_per_domain}").encode()).hexdigest()
             man = data / jobtag(t, p) / "manifest.txt"
             if man.is_file() and f"inputs={digest}" in man.read_text().split("\n")[0].split():
                 done += 1
@@ -511,6 +513,37 @@ def fill_festi_veniani():
         parallel("festi_veniani_jobs.txt", "festi_veniani.joblog", ["oscar/fix_festi_veniani.jl", ".", "{1}"],
                  prog=["julia", "--project=oscar"], jobs=args.fv_jobs, timeout=args.fv_timelimit, env=julia_env())
 
+def embed_units_summary():
+    """Merge the committed embedding jobs' units.jsonl ledgers (one line per domain
+    genus: task, domain, classes, seconds, rows, status ok/overflow/skipped) into
+    embed_units.jsonl, the input for calibrating the stage, and print per-task totals
+    and the overflowed domains (their rows are not in lat_inclusions.tbl)."""
+    import json
+    data = Path("inclusions", "data")
+    if not data.is_dir():
+        return
+    units = []
+    for f in sorted(data.glob("*/units.jsonl")):
+        units += [json.loads(line) for line in f.read_text().splitlines() if line.strip()]
+    with open("embed_units.jsonl", "w") as F:
+        for u in units:
+            F.write(json.dumps(u) + "\n")
+    tot = defaultdict(lambda: defaultdict(float))
+    for u in units:
+        t = tot[u["task"]]
+        t[u["status"]] += 1
+        t["seconds"] += u["seconds"]
+        t["rows"] += u["rows"] if u["status"] == "ok" else 0
+    for task, t in sorted(tot.items()):
+        print(f"  {task}: {int(t['ok'])} domain genera, {int(t['rows'])} rows, {t['seconds'] / 3600:.2f} h"
+              + (f", {int(t['overflow'])} overflowed" if t["overflow"] else "")
+              + (f", {int(t['skipped'])} not loadable" if t["skipped"] else ""), flush=True)
+    over = [u["domain"] for u in units if u["status"] == "overflow"]
+    if over:
+        print(f"  WARNING: {len(over)} domain genera exceeded --embed-max-rows-per-domain "
+              f"{args.embed_max_rows_per_domain} and are left out of lat_inclusions (e.g. {', '.join(over[:5])}; "
+              f"all in embed_units.jsonl)", flush=True)
+
 def theta_hecke_pass():
     """is_theta_distinguished for the genera fill left undecided.  SetHashes writes
     theta_hecke/<r>/<nplus>/<label> for each (the classes' Gram matrices and theta
@@ -622,7 +655,7 @@ def clean_outputs():
     for f in ([Path("atomic_names"), Path("lat_inclusions.tbl")] + sorted(Path(".").glob("atomic_names_partial_*"))
               + sorted(Path(".").glob("fill_missing_*.txt"))
               + [Path("oscar_labels.txt"), Path("oscar_enum.ledger.tsv"), Path("lookup_labels.txt"),
-                 Path("label_lookups.ledger.tsv")]):
+                 Path("label_lookups.ledger.tsv"), Path("embed_units.jsonl")]):
         if f.exists():
             f.unlink()
             removed.append(f.name)
@@ -759,6 +792,7 @@ def main():
                       f"(e.g. {', '.join(unfinished[:3])}); their domains are left out of "
                       f"lat_inclusions and of the certificates.  Rerunning without --clean "
                       f"(e.g. with --skip-list-genera --skip-enumerate-genera) resumes them.", flush=True)
+            embed_units_summary()
             with timed("Writing lat_inclusions.tbl"):
                 wt = subprocess.run(["julia", "--startup-file=no", "oscar/write_table.jl",
                                      "--inclusions-root", "inclusions",

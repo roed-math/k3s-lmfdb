@@ -10,7 +10,12 @@
 #   julia --project=oscar oscar/driver.jl --task corank1 --labels-file F --labels-file2 F2 [options]
 # where F lists domain genus labels (one per line) and, for corank1, F2 lists
 # the rank+1 codomain genus pool.  Options: --data-root DIR (default "."),
-# --out-root DIR (default "inclusions").
+# --out-root DIR (default "inclusions"), --max-rows-per-domain N (default 0 = no
+# cap; a domain genus over it has its rows dropped and is listed as overflowed in
+# the job's units.jsonl and manifest).
+#
+# Each committed job also holds units.jsonl, one line per domain genus: task,
+# domain, classes, seconds, rows, status (ok, overflow, or skipped = not loadable).
 #
 # Resume: a job whose committed directory already holds a manifest recording the
 # same inputs (sha1 of its label files) is skipped, so rerunning the embedding
