@@ -58,3 +58,11 @@ lookup_labels.txt
 label_lookups.ledger.tsv
 embed_pool
 embed.ledger.tsv
+embed_units.jsonl
+# theta-Hecke pass (theta_hecke.m, run_theta_hecke.m)
+/theta_hecke/
+/theta_hecke_done/
+/theta_hecke_jobs/
+/theta_hecke_spaces/
+theta_hecke_jobs.txt
+theta_hecke.joblog
