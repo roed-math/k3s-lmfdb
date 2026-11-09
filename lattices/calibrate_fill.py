@@ -128,18 +128,43 @@ def read_stats(tree):
     return stats
 
 
-def genus_footprint(tree, label, stored):
+# Where a genus's records go: the LMFDB table, and the format file naming its columns
+# (oscar_genus/ is pipeline-internal and not uploaded).
+RECORD_DIRS = [("genera_basic", "lat_genera", "genera_basic.format"),
+               ("genera_advanced", "lat_genera", "genera_advanced.format"),
+               ("oscar_genus", "not uploaded", None),
+               ("lattice_basic_data", "lat_lattices", "lat_basic.format"),
+               ("lattice_advanced_data", "lat_lattices", "lat_advanced.format")]
+
+
+def genus_footprint(tree, label, stored, formats):
     """Files and bytes the pipeline keeps for one genus in the calibration tree: its
     genera_basic, genera_advanced and oscar_genus records and, per stored lattice,
     its lattice_basic_data and lattice_advanced_data records (the per-genus hash
-    files are not counted: they are named by hash, not label)."""
+    files are not counted: they are named by hash, not label).  Also the bytes per
+    (table, column), as text (columns from the first line of each record)."""
     rank, nplus, _ = parse_label(label)
     sub = Path(str(rank), str(nplus))
-    paths = [Path(tree, d, sub, label) for d in ("genera_basic", "genera_advanced", "oscar_genus")]
-    for i in range(1, stored + 1):
-        paths += [Path(tree, d, sub, f"{label}.{i}") for d in ("lattice_basic_data", "lattice_advanced_data")]
-    sizes = [p.stat().st_size for p in paths if p.is_file()]
-    return len(sizes), sum(sizes)
+    files, total, cols = 0, 0, Counter()
+    for d, table, fmt in RECORD_DIRS:
+        names = [label] if d in ("genera_basic", "genera_advanced", "oscar_genus") else \
+                [f"{label}.{i}" for i in range(1, stored + 1)]
+        for name in names:
+            path = Path(tree, d, sub, name)
+            if not path.is_file():
+                continue
+            text = path.read_text()
+            files += 1
+            total += len(text.encode())
+            first, _, rest = text.partition("\n")
+            fields = first.split("|")
+            if fmt in formats and len(fields) == len(formats[fmt]):
+                for c, v in zip(formats[fmt], fields):
+                    cols[(table, c)] += len(v.encode())
+                cols[(table, d + " (separators, further lines)")] += len(text.encode()) - sum(len(v.encode()) for v in fields)
+            else:
+                cols[(table, d)] += len(text.encode())
+    return files, total, cols
 
 
 def read_connect_stats(tree):
@@ -247,20 +272,26 @@ def cmd_report(a):
         print("total connect cpu hours: %.1f" % tot)
     # storage: lattices, files and bytes per genus, extrapolated like the costs
     store = defaultdict(lambda: [0, 0.0, 0.0, 0.0])    # rank -> [pop, lattices, files, bytes]
+    colbytes = Counter()                                # (table, column) -> extrapolated bytes
+    formats = {fmt: Path(tree, fmt).read_text().strip().split("|") for _, _, fmt in RECORD_DIRS
+               if fmt and Path(tree, fmt).exists()}
     for st in sorted(by):
         recs = [(l, stats[l]) for l in sample if stratum(l) == st and l in stats]
         if not recs:
             continue
         P = pop.get(st, 0)
         lat = [int(r["lattices_stored"]) for _, r in recs]
-        fp = [genus_footprint(tree, l, int(r["lattices_stored"])) for l, r in recs]
+        fp = [genus_footprint(tree, l, int(r["lattices_stored"]), formats) for l, r in recs]
+        for _, _, c in fp:
+            for k, v in c.items():
+                colbytes[k] += v / len(fp) * P
         s_ = store[st[0]]
         s_[0] += P
         s_[1] += statistics.mean(lat) * P
-        s_[2] += statistics.mean(f for f, _ in fp) * P
-        s_[3] += statistics.mean(b for _, b in fp) * P
+        s_[2] += statistics.mean(f for f, _, _ in fp) * P
+        s_[3] += statistics.mean(b for _, b, _ in fp) * P
     if store:
-        print("\nstorage (fill output in this tree, extrapolated; connect adds similar-sized advanced records):")
+        print("\nstorage (records in this tree after fill and connect, extrapolated):")
         print("rank  genera(pop)  est_lattices  est_files  est_GB")
         tot = [0, 0.0, 0.0, 0.0]
         for r in sorted(store):
@@ -268,6 +299,17 @@ def cmd_report(a):
             tot = [tot[0] + P, tot[1] + nl, tot[2] + nf, tot[3] + nb]
             print("%4d  %11d  %12.0f  %9.0f  %6.2f" % (r, P, nl, nf, nb / 1e9))
         print("total %11d  %12.0f  %9.0f  %6.2f" % (tot[0], tot[1], tot[2], tot[3] / 1e9))
+        # Text bytes, as in the flat files; Postgres differs per type (numeric arrays
+        # are larger than their text, TOAST compresses values over ~2 kB) and adds indexes.
+        tables = Counter()
+        for (t, c), b in colbytes.items():
+            tables[t] += b
+        print("\nstorage by LMFDB table (text bytes, extrapolated):")
+        for t, b in tables.most_common():
+            print("  %-13s %7.2f GB" % (t, b / 1e9))
+        print("largest columns:")
+        for (t, c), b in colbytes.most_common(15):
+            print("  %-13s %-45s %7.2f GB  %4.1f%%" % (t, c, b / 1e9, 100 * b / sum(tables.values())))
     missing = [l for l in sample if l not in stats]
     if missing:
         print(f"\n{len(missing)} sampled genera have no fill_stats record (crash, error, or not run): "
