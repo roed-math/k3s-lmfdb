@@ -226,7 +226,8 @@ function SplitDepth0(s, sep)
 end function;
 
 intrinsic ParseTensorDecompositions(s::MonStgElt) -> SeqEnum
-{Parse the tensor_decompositions field "[[[lab,ct],...],...]" into a sequence of
+{Parse the tensor_decompositions field "[[["lab",ct],...],...]" (labels unquoted
+ before 2026-11) into a sequence of
  options, each a sequence of tuples <factor_label, count>; "\N" -> empty.}
     if s eq "\\N" or #s lt 2 then return []; end if;
     result := [];
@@ -234,7 +235,9 @@ intrinsic ParseTensorDecompositions(s::MonStgElt) -> SeqEnum
         opt := [];
         for pairstr in SplitDepth0(Substring(optstr, 2, #optstr-2), ",") do
             lc := Split(Substring(pairstr, 2, #pairstr-2), ",");
-            Append(~opt, <lc[1], StringToInteger(lc[2])>);
+            lab := lc[1];
+            if #lab ge 2 and lab[1] eq "\"" then lab := Substring(lab, 2, #lab-2); end if;   // quoted since 2026-11 (JSON)
+            Append(~opt, <lab, StringToInteger(lc[2])>);
         end for;
         Append(~result, opt);
     end for;

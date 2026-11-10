@@ -2,7 +2,7 @@
 
 julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "178da82b4bab1ce1ea1b7d8c43c2966481cc56e3"
+project_hash = "0061a3b830cb8971deb606aeae97581965c66922"
 
 [[deps.ASL_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -407,6 +407,12 @@ deps = ["Artifacts", "JLLWrappers", "Libdl"]
 git-tree-sha1 = "b7970cef8ae1c990ba0c09cd8bdc1145e006632f"
 uuid = "1d63c593-3942-5779-bab2-d838dc0a180e"
 version = "22.1.7+0"
+
+[[deps.LMFDBLattices]]
+deps = ["Distributed", "Oscar", "PrecompileTools", "SHA"]
+path = "LMFDBLattices"
+uuid = "c37f56a1-3b12-4648-b446-e8484bc07ad7"
+version = "0.1.0"
 
 [[deps.LazyArtifacts]]
 deps = ["Artifacts", "Pkg"]

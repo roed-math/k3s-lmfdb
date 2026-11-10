@@ -22,16 +22,16 @@ intrinsic StringToReal(s::MonStgElt) -> RngIntElt
     return #t eq 1 select RealField()!n else RealField()!n + s*RealField()!StringToInteger(t[2])/10^#t[2];
 end intrinsic;
 
-intrinsic ThetaSeriesIncremental(L::Lat, target_prec::RngIntElt, timeout::RngIntElt) -> SeqEnum, RngIntElt, Assoc
-{Compute the theta series coefficients of L, doubling the precision until either target_prec is reached or the time budget timeout (in seconds) is exhausted. Returns the coefficient sequence obtained, the precision actually reached, and an associative array mapping each precision computed to the time (in seconds) it took to compute the theta series to that precision.}
+intrinsic ThetaSeriesIncremental(L::Lat, target_prec::RngIntElt, timeout::RngIntElt : Min := 0) -> SeqEnum, RngIntElt, Assoc
+{Compute the theta series coefficients of L, doubling the precision until either target_prec is reached or the time budget timeout (in seconds) is exhausted. Returns the coefficient sequence obtained, the precision actually reached, and an associative array mapping each precision computed to the time (in seconds) it took to compute the theta series to that precision.  Min is the minimum of L if known (0 if not); it only sets the starting precision, and is a parameter so that this never computes the minimum itself outside a TimeoutCall.}
     best_theta := [];
     best_prec := 0;
     theta_elapsed := AssociativeArray();
     remaining := timeout;
-    prec := Maximum(16, Minimum(L) + 4);
+    prec := Maximum(16, Min + 4);
     while prec le target_prec and remaining gt 0 do
         current_prec := Minimum(prec, target_prec);
-        success, theta, elapsed := TimeoutCall(remaining, ThetaSeries, <L, current_prec - 1>, 1);
+        success, theta, elapsed := TimeoutCall(remaining, ThetaSeries, <L, current_prec - 1>, 1 : HardKill := true);
         if not success then
             vprintf FillGenus, 1 : "Theta series timed out at precision %o\n", current_prec;
             break;
@@ -94,11 +94,64 @@ function RescaledDualNF(L)
     return NumberFieldLattice(Rows(ChangeRing(B, K)) : InnerProduct := ChangeRing(M,K));
 end function;
 
-function adjacency_matrix_of(G, p)
+function hecke_data_of(G, p)
     // Wrapped so it can run under TimeoutCall: AdjacencyMatrix walks the p-neighbour graph
     // in a C-level builtin that does not yield to Magma's Alarm, so it needs the HardKill
-    // watchdog to be bounded (it can take >75s for a single rank-8 genus).
-    return AdjacencyMatrix(G, p);
+    // watchdog to be bounded (it can take >75s for a single rank-8 genus).  The
+    // characteristic polynomial and its factorisation are dense in the class number, so
+    // they run in the same child.
+    Ap := AdjacencyMatrix(G, p);
+    fpf := Factorization(CharacteristicPolynomial(Ap));
+    return Ap, [(<Coefficients(pair[1]), pair[2]>) : pair in fpf];
+end function;
+
+// Per-lattice computations that run in HardKill children (see the loop in FillGenus).
+// The batch process itself must make no call that can run unbounded: nothing outside
+// can interrupt it, so one stuck builtin there hangs the whole batch.  The children
+// are grouped because at low rank the fork, not the computation, is the cost: a
+// HardKill TimeoutCall costs ~7-15 ms of wall-clock in a fill batch, against well
+// under 1 ms for each of these at rank 4.
+
+// The minimum and what is read off it (Magma caches it on L, so the kissing number,
+// density and Hermite number reuse it), the root system, and the minimum of the
+// rescaled dual D, which sets where its theta series starts.
+function minimum_data(L, D)
+    m := Minimum(L);
+    roots := m ge 3 select "0" else RootString(L : IsRootSystem := false);
+    return m, KissingNumber(L), Density(L), HermiteNumber(L), roots, Minimum(D);
+end function;
+
+function root_string_of(L)
+    return RootString(L : IsRootSystem := false);
+end function;
+
+function successive_minima_of(L)
+    minima, _ := SuccessiveMinima(L);
+    return minima;
+end function;
+
+// The order of the image of O(L) in the automorphism group of the discriminant group
+// L^#/L, and the SmallGroups label of the automorphism group ("\N" when IdentifyGroup
+// cannot handle the order).  The image lies in O(q_L), and the Festi-Veniani index is
+// [O(q_L) : image]; Magma has no orthogonal groups of torsion quadratic forms, so
+// oscar/fix_festi_veniani.jl computes |O(q_L)| and the index from the image order,
+// which fill records in festi_veniani/ (the index used to divide #Aut(L^#/L), the
+// automorphism group of the abelian group, instead of |O(q_L)|).  The discriminant
+// group's automorphism group order and invariants are returned so that the caller can
+// check them against the genus: an assert in the child would only make the call fail
+// quietly.
+function aut_data(Lcanon, aut_group, disc_aut_size)
+    LD := Dual(Lcanon : Rescale:=false);
+    discL, quo := LD/Lcanon;
+    disc_aut := AutomorphismGroup(discL);
+    gens_disc := [discL.i : i in [1..Ngens(discL)]];
+    im_aut := [hom< discL -> discL | [quo(x@@quo*ChangeRing(alpha, Rationals())): x in gens_disc]> : alpha in Generators(aut_group)];
+    aut_label := "\\N";
+    if CanIdentifyGroup(#aut_group) then
+        Aid := IdentifyGroup(aut_group);
+        aut_label := Sprintf("%o.%o", Aid[1], Aid[2]);
+    end if;
+    return #sub<disc_aut | im_aut>, #disc_aut, Invariants(discL), aut_label;
 end function;
 
 function SphereVolume(n)
@@ -112,7 +165,121 @@ function SphereVolume(n)
     end if;
 end function;
 
-intrinsic FillGenus(label::MonStgElt : timeout := 1800, masslimit := 0, sizelimit := 0, timelimit := 0, adjlimit := 0, perlattice := 0, use_orth := true, force_orth := false)
+// Coefficient i (1-based) of a stored theta series.  ThetaSeriesIncremental stores
+// Eltseq of the power series, which drops trailing zero coefficients, so a list
+// can be shorter than its precision (common for rescaled duals, whose scale makes
+// most coefficients zero); the missing coefficients are 0, as FirstDiff and
+// ThetaHash in hash.m already assume.  Indexing past the end crashed the sort:
+// "Sequence index 182 should be in the range 1 to 181" on 8.8.504.001.01.3827.
+function coeff(f, i)
+    return i le #f select f[i] else 0;
+end function;
+
+// Once per process, before the first genus (FillGenus and ConnectGenus both call it):
+// run each kind of per-lattice computation on two fixed small lattices, here in the
+// batch process.  Magma initialises a lot lazily on first use (the SmallGroups
+// database, real constants, factorisation and enumeration machinery), and the
+// children FillGenus forks inherit whatever the batch process has initialised, but
+// discard what they initialise themselves.  When the
+// minimum, density, IdentifyGroup and the Hecke polynomials were computed in the
+// batch process this happened as a side effect; once they moved into HardKill
+// children, every child paid it again, and fill took ~1.5x as long at rank <= 4.
+// The inputs are fixed and tiny, so this is bounded (~0.1 s).
+fill_warm := NewStore();
+
+intrinsic WarmLatticeCaches()
+{Initialise, once per process, what the per-lattice computations of fill and connect
+initialise lazily, so that the TimeoutCall children they fork inherit it.}
+    if StoreIsDefined(fill_warm, "done") then return; end if;
+    E8 := LatticeWithGram(CartanMatrix("E8"));
+    W2 := LatticeWithGram(DiagonalJoin(CartanMatrix("A2"), Matrix(Integers(), 1, 1, [6])));
+    for W in [E8, W2] do
+        _ := Minimum(W); _ := KissingNumber(W); _ := Density(W); _ := HermiteNumber(W);
+        _ := SuccessiveMinima(W); _ := RootString(W : IsRootSystem := false);
+        _ := ThetaSeries(W, 20); _ := ThetaSeries(Dual(W), 20);
+        _ := CanonicalForm(GramMatrix(W));
+        _ := GroupToString(AutomorphismGroupFaster(W) : use_id := false);
+        // connect
+        _ := IsIsomorphic(W, LatticeWithGram(GramMatrix(W)));
+        _ := OrthogonalDecompositionFaster(W);
+        _ := BVHash(W, 1, 3);
+        _ := EvenSublattice(W);
+    end for;
+    _ := IdentifyGroup(SmallGroup(12, 3));
+    _ := Factorization(CharacteristicPolynomial(Matrix(Integers(), 2, 2, [1, 2, 3, 4])));
+    _ := #AutomorphismGroup(AbelianGroup([2, 6]));
+    StoreSet(fill_warm, "done", true);
+end intrinsic;
+
+// Two optional integer keys, larger first.  A key that was not computed ("\N": its
+// TimeoutCall overran or failed) sorts after every computed one.  Comparing only when both are
+// present, as cmp_lat used to, is not transitive once some keys are missing
+// (a ~ b ~ c with a < c), and Sort then returns an order that depends on the order
+// the classes were enumerated in.
+function cmp_int_desc(a, b)
+    ka := Type(a) eq RngIntElt;
+    kb := Type(b) eq RngIntElt;
+    if ka and kb then return b - a; end if;
+    if ka ne kb then return ka select -1 else 1; end if;
+    return 0;
+end function;
+
+// Two stored theta series, coefficient by coefficient, smaller first.  A coefficient
+// at or past a series' precision is unknown and sorts after every known one, so
+// that two series are compared as fixed sequences and the order stays transitive
+// when the precisions differ.
+function cmp_theta(f1, p1, f2, p2)
+    if Type(f1) ne SeqEnum then p1 := 1; end if;
+    if Type(f2) ne SeqEnum then p2 := 1; end if;
+    for i in [1..Maximum(p1, p2) - 1] do
+        k1 := i lt p1;
+        k2 := i lt p2;
+        if k1 ne k2 then return k1 select -1 else 1; end if;
+        d := coeff(f1, i) - coeff(f2, i);
+        if d ne 0 then return d; end if;
+    end for;
+    return 0;
+end function;
+
+// Sort order of the lattices of a genus (records as built in FillGenus); file level
+// so tests/test_fill_sort.m can exercise it.  The order fixes the labels.  Every key
+// but the last can be missing when its computation timed out, so labels are fixed by
+// the run that enumerates the genus, not by the genus alone; a missing key sorts
+// after every present one, which keeps this a total preorder.
+function cmp_lat(L1, L2)
+    n := Isqrt(#L1["gram"]);
+    // 1. automorphism group size (larger first)
+    d := cmp_int_desc(L1["aut_size"], L2["aut_size"]);
+    if d ne 0 then return d; end if;
+    // 2. density (denser first); within a genus the determinant is fixed, so we
+    //    sort by the minimum as a proxy (larger minimum = denser)
+    d := cmp_int_desc(L1["minimum"], L2["minimum"]);
+    if d ne 0 then return d; end if;
+    // 3. root system (larger first, see CompareRootStrings)
+    r1 := L1["root_sublattice"];
+    r2 := L2["root_sublattice"];
+    if r1 ne "\\N" and r2 ne "\\N" then
+        d := CompareRootStrings(r1, r2);
+        if d ne 0 then return d; end if;
+    elif r1 ne r2 then
+        return r1 ne "\\N" select -1 else 1;
+    end if;
+    // 4. theta series
+    d := cmp_theta(L1["theta_series"], L1["theta_prec"], L2["theta_series"], L2["theta_prec"]);
+    if d ne 0 then return d; end if;
+    // 5. dual theta series
+    d := cmp_theta(L1["dual_theta_series"], L1["dual_theta_prec"], L2["dual_theta_series"], L2["dual_theta_prec"]);
+    if d ne 0 then return d; end if;
+    // 6. tiebreaker: the Gram matrix entries (canonical when CanonicalForm finished,
+    //    else the LLL-reduced Gram matrix, which depends on the enumeration)
+    for i in [1..n^2] do
+        d := L1["gram"][i] - L2["gram"][i];
+        if (d ne 0) then return d; end if;
+    end for;
+    return 0;
+end function;
+
+intrinsic FillGenus(label::MonStgElt : timeout := 1800, masslimit := 0, sizelimit := 0, timelimit := 0, adjlimit := 0, perlattice := 0, use_orth := true, force_orth := false, stats := false, oscar := "oscar_genus")
 {Fill the data for a genus and its lattice representatives, given files in the genera_basic format.
 
 Enumeration guards (0 = unlimited): masslimit skips enumerating a definite genus whose
@@ -135,7 +302,11 @@ perlattice without raising timelimit turns partial data into no data.  Left at 0
 falls back to the old timeout/class_number budget.
 
 use_orth selects the orbit-method
-enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
+enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).
+stats writes one fill_stats/ record per genus (fill_stats.format): which guard, if any,
+decided the outcome, the class number, per-phase wall-clock and the slowest single
+lattice -- the data for calibrating the guards (calibrate_fill.py).}
+    WarmLatticeCaches();
     genus_t0 := Realtime();
     data := Split(Split(Read(LabelPath("genera_basic", label)), "\n")[1], "|");
     basic_format := Split(Read("genera_basic.format"), "|");
@@ -173,8 +344,51 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
         mass_pieces := Split(basics["mass"][2..#basics["mass"]-1], ",");
         genus_mass := StringToInteger(mass_pieces[1]) / StringToInteger(mass_pieces[2]);
     end if;
-    skip_massive := (masslimit gt 0) and (n eq s) and (genus_mass gt masslimit);
-    if skip_massive then
+    spinor := 0;   // the spinor generators, for indefinite rank >= 3 (see GenusReps)
+    // Classes enumerated with Oscar (oscar/pool.jl --task enumerate, run by
+    // run_all.py before fill): indefinite genera of rank >= 3, whose Magma spinor
+    // kernel can overcount, and definite genera of small rank, where Oscar is faster.
+    // An ok record replaces GenusReps; its automorphism group orders and root systems
+    // are kept per class (oscar_aut, oscar_root) to cross-check Magma's and to stand in
+    // when Magma's computation overruns.  A failed record falls back to Magma for a
+    // definite genus but not for an indefinite one of rank >= 3, whose Magma class
+    // number may be wrong.
+    oscar_status := "none";
+    oscar_aut := [];
+    oscar_root := [];
+    opath := LabelPath(oscar, label);
+    if OpenTest(opath, "r") then
+        olines := Split(Read(opath), "\n");
+        ohead := AssociativeArray();
+        for kv in Split(olines[1], " ") do
+            pos := Index(kv, "=");
+            if pos gt 0 then ohead[kv[1..pos-1]] := kv[pos+1..#kv]; end if;
+        end for;
+        oscar_status := IsDefined(ohead, "status") select ohead["status"] else "bad";
+        if oscar_status eq "ok" then
+            oreps := [];
+            for line in olines[2..#olines] do
+                f := Split(line, "|");
+                Append(~oreps, GramStringToLat(f[1], n));
+                Append(~oscar_aut, f[2] eq "\\N" select 0 else StringToInteger(f[2]));
+                Append(~oscar_root, f[3]);
+            end for;
+            error if #oreps ne StringToInteger(ohead["classes"]), Sprintf("%o: %o classes in %o, header says %o", label, #oreps, opath, ohead["classes"]);
+            if ohead["spinor_generators"] ne "\\N" then
+                spinor := [StringToInteger(x) : x in Split(ohead["spinor_generators"][2..#ohead["spinor_generators"]-1], ",")];
+            end if;
+        end if;
+    end if;
+    from_oscar := oscar_status eq "ok";
+    no_magma := (not from_oscar) and oscar_status ne "none" and (n ne s) and (n ge 3);
+    skip_massive := (not from_oscar) and (masslimit gt 0) and (n eq s) and (genus_mass gt masslimit);
+    if from_oscar then
+        vprintf FillGenus, 1 : "Classes from %o\n", opath;
+        genus_success, reps, orth_prov := Explode(<true, oreps, 0>);
+    elif no_magma then
+        vprintf FillGenus, 1 : "Oscar enumeration %o; no Magma fallback for an indefinite genus of rank >= 3\n", oscar_status;
+        genus_success := false;
+    elif skip_massive then
         vprintf FillGenus, 1 : "Skipping enumeration: mass exceeds masslimit %o\n", masslimit;
         genus_success := false;
     else
@@ -182,10 +396,18 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
         // (genus_reps.m); use_orth toggles the orbit method for definite rank >= 3,
         // refined by the rank/mass heuristic (the neighbour walk stays the default
         // for small class numbers at low rank, where it wins).
-        genus_success, reps, orth_prov := GenusReps(L0 : Timeout := timeout,
+        genus_success, reps, orth_prov, spinor := GenusReps(L0 : Timeout := timeout,
             UseOrth := use_orth and (force_orth or UseOrthHeuristic(n, genus_mass)));
     end if;
+    t_enum := Realtime(genus_t0);
+    enum_method := from_oscar select "oscar" else no_magma select "oscar_" * oscar_status else
+                   skip_massive select "none" else ((n eq s and use_orth and n ge 3 and (force_orth or UseOrthHeuristic(n, genus_mass))) select "orth" else "default");
+    adj_status := "none";
     advanced["class_number"] := "\\N";
+    // Indefinite rank >= 3: the classes are labelled by their spinor coordinates
+    // relative to the published rep (genus_reps_Spinor), recorded per lattice in
+    // spinor_coordinates; this records the primes they refer to.
+    advanced["spinor_generators"] := (spinor cmpne 0) select to_postgres(spinor) else "\\N";
     advanced["adjacency_matrix"] := "\\N";
     advanced["adjacency_polynomials"] := "\\N";
     // ambient_genus: the genus of the parent lattices from which this genus's
@@ -211,7 +433,7 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
         // class number 1.  We estimate that work and skip the matrix past adjlimit (a
         // work budget), an adaptive cutoff that captures both the rank and class-number
         // dependence, rather than a crude cap on either alone.  The class number is still
-        // recorded, and pneighbors below is emitted only when the matrix exists.
+        // recorded.
         adj_work := #reps * (&+[Integers() | p^Maximum(n-2, 0) : p in hecke_primes(n)]);
         have_adjacency := (n eq s) and ((adjlimit le 0) or (adj_work le adjlimit));
         if have_adjacency then
@@ -223,24 +445,23 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
             // HardKill watchdog.  If it overruns we drop the (optional) Hecke data for
             // this genus -- the class number is already recorded -- rather than let a few
             // genera dominate wall-clock.
-            adj_success, adj_out, adj_elapsed := TimeoutCall(timeout, adjacency_matrix_of, <G, p>, 1 : HardKill := true);
+            adj_success, adj_out, adj_elapsed := TimeoutCall(timeout, hecke_data_of, <G, p>, 2 : HardKill := true);
             if not adj_success then
                 vprintf FillGenus, 1 : "(timed out after ~%os, skipping Hecke data)\n", timeout;
                 adj_ok := false;
                 break;
             end if;
-            Ap := adj_out[1];
             vprintf FillGenus, 1 : "computed in %o seconds\n", adj_elapsed;
-            fpf := Factorization(CharacteristicPolynomial(Ap));
-            hecke_mats[p] := Ap;
-            hecke_polys[p] := [(<Coefficients(pair[1]), pair[2]>) : pair in fpf];
+            hecke_mats[p] := adj_out[1];
+            hecke_polys[p] := adj_out[2];
           end for;
+          adj_status := adj_ok select "ok" else "timeout";
           if adj_ok then
             vprintf FillGenus, 1 : "Done!\n";
             advanced["adjacency_matrix"] := to_postgres(hecke_mats);
             advanced["adjacency_polynomials"] := to_postgres(hecke_polys);
           else
-            have_adjacency := false;   // no Hecke data -> the pneighbors block below is skipped
+            have_adjacency := false;
           end if;
         end if;
     else
@@ -248,7 +469,9 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
     end if;
     // sizelimit: past this class number, keep the genus-level record but skip the
     // per-lattice loop below (individual automorphism groups, theta series, hashes).
-    if (sizelimit gt 0) and (#reps gt sizelimit) then
+    t_adj := Realtime(genus_t0) - t_enum;
+    size_skipped := (sizelimit gt 0) and (#reps gt sizelimit);
+    if size_skipped then
         vprintf FillGenus, 1 : "Class number %o exceeds sizelimit %o: storing genus-level data only\n", #reps, sizelimit;
         reps := [];
     end if;
@@ -263,10 +486,11 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
 
     if (#reps gt 0) then
         // PER-OPERATION timeout, NOT a per-lattice aggregate: to_per_rep is passed
-        // independently to CanonicalForm, AutomorphismGroupFaster, the primal theta series
-        // and the dual theta series below, so a single lattice can spend up to ~4*to_per_rep
-        // (plus the unbounded Minimum/kissing work between them).  The aggregate wall-clock
-        // guard is the per-GENUS timelimit checked at the top of this loop, not this value.
+        // independently to CanonicalForm, AutomorphismGroupFaster, the primal theta series,
+        // the dual theta series and each of the smaller guarded calls below (minimum,
+        // root system, successive minima, ...), so a single lattice can spend several
+        // multiples of to_per_rep.  The aggregate wall-clock guard is the per-GENUS
+        // timelimit checked at the top of this loop, not this value.
         // perlattice gives every operation the same budget regardless of class number; the
         // old timeout/#reps split a fixed budget across the representatives, which starved
         // precisely the large genera (class number 55 at timeout 300 => 6s per operation,
@@ -285,7 +509,11 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
     // (a genus under sizelimit whose individual lattices are still pathologically slow),
     // stop and fall back to the genus-level record rather than grinding for hours.
     genus_timed_out := false;
+    reps_done := 0;
+    max_lat_time := 0.0;
+    t_loop0 := Realtime();
     for Li->L in reps do
+        t_lat0 := Realtime();
         if (timelimit gt 0) and (Realtime(genus_t0) gt timelimit) then
             vprintf FillGenus, 1 : "Per-genus timelimit %o s exceeded at rep %o/%o: storing genus-level data only\n", timelimit, Li, #reps;
             genus_timed_out := true;
@@ -303,7 +531,8 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
         // This is no longer part of the lattice, only of the genus
         // lat["dual_conway"] := "\\N";
         lat["aut_size"] := "\\N";
-        lat["festi_veniani_index"] := "\\N";
+        lat["festi_veniani_index"] := "\\N";   // filled in by oscar/fix_festi_veniani.jl
+        lat["fv_image"] := "\\N";              // |image of O(L) in Aut(L^#/L)|, for festi_veniani/
         lat["aut_label"] := "\\N";
         lat["aut_group"] := "\\N";
         lat["is_chiral"] := "\\N";
@@ -328,6 +557,9 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
         lat["dual_theta_series"] := "\\N";
         lat["dual_theta_prec"] := "\\N";
         lat["successive_minima"] := "\\N";
+        lat["root_sublattice"] := "\\N";
+        // reps are in label order for these genera, so position Li is label .Li
+        lat["spinor_coordinates"] := (spinor cmpne 0) select SpinorCoordinates(Li, #spinor) else "\\N";
         // Only set below in the positive-definite (n eq s) branch; default them here
         // so the indefinite case still has every column.
         lat["center_density"] := "\\N";
@@ -360,7 +592,7 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
             // succeeds, Lcanon and lat["gram"] both get overwritten together to the
             // canonical lattice, staying in sync the same way.
             Lcanon := LatticeWithGram(gram);
-            success, canonical_gram, elapsed := TimeoutCall(to_per_rep, CanonicalForm, <gram>, 1);
+            success, canonical_gram, elapsed := TimeoutCall(to_per_rep, CanonicalForm, <gram>, 1 : HardKill := true);
             vprintf FillGenus, 1 : "Canonical form computed in %o seconds\n", elapsed;
             if success then
                 canonical_gram := canonical_gram[1];
@@ -370,35 +602,72 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
                 Lcanon := LatticeWithGram(canonical_gram);
                 lat["lattice"] := Lcanon;
             end if;
-            success, aut_group, elapsed := TimeoutCall(to_per_rep, AutomorphismGroupFaster, <Lcanon>, 1);
+            success, aut_group, elapsed := TimeoutCall(to_per_rep, AutomorphismGroupFaster, <Lcanon>, 1 : HardKill := true);
             vprintf FillGenus, 1 : "Automorphism group computed in %o seconds\n", elapsed;
             if success then
                 aut_group := aut_group[1];
                 lat["aut_group"] := GroupToString(aut_group : use_id:=false);
                 lat["aut_size"] := #aut_group;
                 lat["is_chiral"] := &and[Determinant(g) eq 1 : g in Generators(aut_group)];
-                // double checking, but also useful for festi-veniani
-                LD := Dual(Lcanon : Rescale:=false);
-                discL, quo := LD/Lcanon;
-                disc_aut := AutomorphismGroup(discL);
-                assert disc_aut_size eq #disc_aut;
-                assert disc_invs eq Invariants(discL);
-                gens_disc := [discL.i : i in [1..Ngens(discL)]];
-                im_aut := [hom< discL -> discL | [quo(x@@quo*ChangeRing(alpha, Rationals())): x in gens_disc]> : alpha in Generators(aut_group)];
-                lat["festi_veniani_index"] := disc_aut_size div #sub<disc_aut | im_aut>;
-                if CanIdentifyGroup(#aut_group) then
-                    Aid := IdentifyGroup(aut_group);
-                    lat["aut_label"] := Sprintf("%o.%o", Aid[1], Aid[2]);
+                // the discriminant group is checked against the genus here, and is
+                // also what the Festi-Veniani index needs
+                ok, ad := TimeoutCall(to_per_rep, aut_data, <Lcanon, aut_group, disc_aut_size>, 4 : HardKill := true);
+                if ok then
+                    assert disc_aut_size eq ad[2];
+                    assert disc_invs eq ad[3];
+                    lat["fv_image"] := ad[1];
+                    lat["aut_label"] := ad[4];
                 end if;
             end if;
-            lat["density"] := Density(L);
-            lat["center_density"] := lat["density"] / SphereVolume(n);
-            lat["hermite"] := HermiteNumber(L);
-            lat["kissing"] := KissingNumber(L);
-            m := Minimum(L);
-            lat["minimum"] := m;
+            // Oscar's automorphism group order (isometry_group): a cross-check, and the
+            // value when Magma's computation overran (aut_size is a sort key, cmp_lat)
+            if from_oscar and oscar_aut[Li] gt 0 then
+                if Type(lat["aut_size"]) eq RngIntElt then
+                    error if lat["aut_size"] ne oscar_aut[Li],
+                        Sprintf("%o class %o: #Aut %o from Magma, %o from Oscar", label, Li, lat["aut_size"], oscar_aut[Li]);
+                else
+                    lat["aut_size"] := oscar_aut[Li];
+                end if;
+            end if;
+            D := Dual(L);
+            // LLL always finishes (polynomial time), so it is safe here in the batch
+            // process, and it caches a reduced basis on L and D that every child below
+            // inherits; without it each theta-series child redoes that work (~4 ms per
+            // child at rank 4, measured -- it was the unguarded Minimum here that used
+            // to warm this cache).
+            _ := LLL(L);
+            _ := LLL(D);
+            m := 0;    // the minimum, 0 while unknown
+            dm := 0;   // the dual's minimum, likewise
+            ok, md := TimeoutCall(to_per_rep, minimum_data, <L, D>, 6 : HardKill := true);
+            if ok then
+                m := md[1];
+                lat["minimum"] := m;
+                lat["kissing"] := md[2];
+                lat["density"] := md[3];
+                lat["center_density"] := md[3] / SphereVolume(n);
+                lat["hermite"] := md[4];
+                lat["root_sublattice"] := md[5];
+                dm := md[6];
+            elif not (from_oscar and oscar_root[Li] ne "\\N") then
+                // The root system is a sort key (cmp_lat), so try it on its own:
+                // enumerating vectors of norm <= 2 can be much cheaper than finding
+                // the minimum.
+                ok, rs := TimeoutCall(to_per_rep, root_string_of, <L>, 1 : HardKill := true);
+                if ok then lat["root_sublattice"] := rs[1]; end if;
+            end if;
+            // Oscar's root system (root_lattice_recognition, same string format): a
+            // cross-check, and the value when Magma's overran
+            if from_oscar and oscar_root[Li] ne "\\N" then
+                if lat["root_sublattice"] ne "\\N" then
+                    error if lat["root_sublattice"] ne oscar_root[Li],
+                        Sprintf("%o class %o: root system %o from Magma, %o from Oscar", label, Li, lat["root_sublattice"], oscar_root[Li]);
+                else
+                    lat["root_sublattice"] := oscar_root[Li];
+                end if;
+            end if;
             target_prec := Max(150, m+4);
-            theta, theta_prec, rep_theta_elapsed := ThetaSeriesIncremental(L, target_prec, to_per_rep);
+            theta, theta_prec, rep_theta_elapsed := ThetaSeriesIncremental(L, target_prec, to_per_rep : Min := m);
             for p in Keys(rep_theta_elapsed) do
                 theta_elapsed[p] := IsDefined(theta_elapsed, p)
                     // Maximum for worst case Hash computation.
@@ -430,10 +699,9 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
                 lat["theta_series"] := [1];
                 lat["theta_prec"] := 1;
             end if;
-            // Dual theta series (used as a tie-breaker in cmp_lat below, and stored
-            // alongside the primal theta series).
-            D := Dual(L);
-            dual_theta, dual_theta_prec := ThetaSeriesIncremental(D, Max(150, Minimum(D) + 4), to_per_rep);
+            // Dual theta series: a tie-breaker in cmp_lat below, not stored (dropped
+            // from lat_basic.format on 2026-11-09 for size; dual_label points to it).
+            dual_theta, dual_theta_prec := ThetaSeriesIncremental(D, Max(150, dm + 4), to_per_rep : Min := dm);
             if dual_theta_prec gt 0 then
                 lat["dual_theta_series"] := dual_theta;
                 lat["dual_theta_prec"] := dual_theta_prec;
@@ -441,13 +709,10 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
                 lat["dual_theta_series"] := [1];
                 lat["dual_theta_prec"] := 1;
             end if;
-            //success, minima, elapsed := TimeoutCall(to_per_rep, SuccessiveMinima, <L>, 2);
-            //vprintf FillGenus, 1 : "Successive minima computed in %o seconds\n", elapsed;
-            //if success then 
-            //lat["successive_minima"] := minima[1]; // For now, we throw away the vecs
-            //end if;
-            minima, vecs := SuccessiveMinima(L);
-            lat["successive_minima"] := minima;
+            ok, minima := TimeoutCall(to_per_rep, successive_minima_of, <L>, 1 : HardKill := true);
+            if ok then
+                lat["successive_minima"] := minima[1];
+            end if;
 
         end if;
         lat["hash"] := "\\N";
@@ -455,7 +720,14 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
         //lat["level"] := Level(LatticeWithGram(ChangeRing(GramMatrix(L), Integers()) : CheckPositive:=false));
 
         Append(~lats, lat);
+        reps_done +:= 1;
+        max_lat_time := Maximum(max_lat_time, Realtime(t_lat0));
     end for;
+    t_lattices := Realtime(t_loop0);
+    // per-operation timeouts (or failures) inside the loop, counted before a timelimit
+    // discard empties lats; definite only (indefinite lattices never get either)
+    canon_nulls := (n eq s) select #[lat : lat in lats | not lat["gram_is_canonical"]] else 0;
+    aut_nulls := (n eq s) select #[lat : lat in lats | Type(lat["aut_size"]) ne RngIntElt] else 0;
 
     // If the per-genus timelimit tripped mid-loop, discard the partial lattices so the
     // record is consistent (class_number set, genus-level data only) rather than
@@ -464,56 +736,26 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
 
     vprintf FillGenus, 1 : "Done!\n";
 
-    function cmp_lat(L1, L2)
-        // 1. automorphism group size (larger first)
-        if Type(L1["aut_size"]) eq RngIntElt and Type(L2["aut_size"]) eq RngIntElt then
-            d := L2["aut_size"] - L1["aut_size"];
-            if (d ne 0) then return d; end if;
-        end if;
-        // 2. density (denser first); within a genus the determinant is fixed, so we
-        //    sort by the minimum as a proxy (larger minimum = denser)
-        if Type(L1["minimum"]) eq RngIntElt and Type(L2["minimum"]) eq RngIntElt then
-            d := L2["minimum"] - L1["minimum"];
-            if (d ne 0) then return d; end if;
-        end if;
-        // 3. theta series
-        if Type(L1["theta_series"]) eq SeqEnum and Type(L2["theta_series"]) eq SeqEnum then
-            prec := Minimum(L1["theta_prec"], L2["theta_prec"]);
-            for i in [1..prec - 1] do
-                d := L1["theta_series"][i] - L2["theta_series"][i];
-                if (d ne 0) then return d; end if;
-            end for;
-        end if;
-        // 4. dual theta series
-        if Type(L1["dual_theta_series"]) eq SeqEnum and Type(L2["dual_theta_series"]) eq SeqEnum then
-            prec := Minimum(L1["dual_theta_prec"], L2["dual_theta_prec"]);
-            for i in [1..prec - 1] do
-                d := L1["dual_theta_series"][i] - L2["dual_theta_series"][i];
-                if (d ne 0) then return d; end if;
-            end for;
-        end if;
-        // 5. arbitrary tiebreaker: the (reduced) Gram matrix entries
-        for i in [1..n^2] do
-            d := L1["gram"][i] - L2["gram"][i];
-            if (d ne 0) then return d; end if;
-        end for;
-        return 0;
-    end function;
 
-    // Tie breaker
-
-    // Need dual_label, dual_conway
-    // Compute festi_veniani_index in Sage?
-    // Need label for lattice.  Don't want the label to rely on a difficult computation.  So we should probably avoid using the canonical form, and maybe avoid the automorphism group.
-    // Proposal: Sort lexicographically by:
-    // 1. Size of automorphism group (larger first): unfortunately this may be hard to compute
-    // 2. Density - sort by minimum instead
-    // 3. theta series
-    // 4. dual theta series
-    // 5. arbitrary tiebreaker
-    // TODO: Sort reps according to canonical form?
+    // Label order (cmp_lat): automorphism group size, minimum, root system, theta
+    // series, dual theta series, then the Gram matrix.  Any of the first five can be
+    // missing when its computation timed out, so the labels are fixed by the run that
+    // enumerates the genus rather than by the genus alone.
     if (n eq s) then
         Sort(~lats, cmp_lat, ~perm);
+    end if;
+    // Store the Hecke matrices in label order: row and column i belong to the lattice
+    // labelled .i, which is the enumerated class i^perm (Sort gives new lats[i] =
+    // old lats[i^perm]).  The enumeration order is random from run to run, so a
+    // matrix left in it cannot be matched to the labels.  When no lattices are stored
+    // (sizelimit, timelimit) there are no labels, and it stays in enumeration order.
+    if have_adjacency and #lats gt 0 then
+        for p in Keys(hecke_mats) do
+            A := hecke_mats[p];
+            N := Nrows(A);
+            hecke_mats[p] := Matrix(Integers(), N, N, &cat[[A[i^perm, j^perm] : j in [1..N]] : i in [1..N]]);
+        end for;
+        advanced["adjacency_matrix"] := to_postgres(hecke_mats);
     end if;
 
     SetColumns(0);
@@ -531,7 +773,10 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
     end if;
 
     if #lats gt 0 then
-        SetHashes(~lats, ~advanced, theta_elapsed, timeout);
+        // the Hecke matrices (in label order, above) let the theta-Hecke pass skip
+        // recomputing the adjacency of a genus SetHashes leaves undecided
+        SetHashes(~lats, ~advanced, theta_elapsed, timeout :
+                  Adjacency := have_adjacency select hecke_mats else AssociativeArray(), Sidecar := "theta_hecke");
     else
         // GenusRepresentatives failed (e.g. timed out on a hard genus): record the
         // genus with no stored lattices.  HashGenus factors through the canonical
@@ -547,18 +792,20 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
     // so that it can be looked up when needed (see lookup_hash_function in connect_genus.m)
     Write(LabelPath("genera_hash", n, s, IntegerToString(advanced["genus_hash"]) : Create), advanced["hash_function"] : Overwrite);
 
+    // festi_veniani/<rank>/<nplus>/<genus>: "<lattice label>|<image order>" for every
+    // lattice whose image of O(L) on the discriminant group was computed; the index
+    // itself is \N here and oscar/fix_festi_veniani.jl fills it in.
+    fv_lines := [Sprintf("%o|%o", lat["label"], lat["fv_image"]) : lat in lats | Type(lat["fv_image"]) eq RngIntElt];
+    if #fv_lines gt 0 then
+        Write(LabelPath("festi_veniani", basics["label"] : Create), Join(fv_lines, "\n") : Overwrite);
+    end if;
     for idx->L in lats do
         lat := L;
-        if have_adjacency then   // pneighbors are read off the Hecke matrix, so only when it was computed
-            pNeighbors := AssociativeArray();
-            for p in hecke_primes(n) do
-                // !!! TODO - check that permutation is applied in the right direction
-                pNeighbors[p] := ["\"" * lats[j]["label"] * "\"" : j in [1..#lats] | hecke_mats[p][idx^perm,j^perm] ne 0];
-            end for;
-            lat["pneighbors"] := to_postgres(pNeighbors);
-        else
-            lat["pneighbors"] := "\\N";
-        end if;
+        Remove(~lat, "fv_image");
+        // only used to sort the genus (cmp_lat); the p-neighbours of a lattice are
+        // its row of the genus's adjacency_matrix, so no per-lattice copy is stored
+        Remove(~lat, "dual_theta_series");
+        Remove(~lat, "dual_theta_prec");
         Remove(~lat, "lattice");
         error if Keys(lat) ne Set(lat_format), [k : k in lat_format | k notin Keys(lat)], [k : k in Keys(lat) | k notin lat_format];
         output := Join([Sprintf("%o", to_postgres(lat[k])) : k in lat_format], "|");
@@ -573,5 +820,32 @@ enumeration for definite genera of rank >= 3 (see GenusReps in genus_reps.m).}
     error if Keys(advanced) ne Set(advanced_format), [k : k in advanced_format | k notin Keys(advanced)], [k : k in Keys(advanced) | k notin advanced_format];
     output := Join([basics[k] : k in basic_format] cat [Sprintf("%o", advanced[k]) : k in advanced_format], "|");
     Write(LabelPath("genera_advanced", label : Create), output : Overwrite);
+    if stats then
+        outcome := skip_massive select "mass_skip" else
+                   (not genus_success) select "enum_fail" else
+                   size_skipped select "size_skip" else
+                   genus_timed_out select "time_discard" else "ok";
+        st := AssociativeArray();
+        st["label"] := label;
+        st["rank"] := n;
+        st["nplus"] := s;
+        st["disc_abs"] := basics["disc_abs"];
+        st["mass"] := basics["mass"];
+        st["method"] := enum_method;
+        st["outcome"] := outcome;
+        st["class_number"] := advanced["class_number"];
+        st["lattices_stored"] := #lats;
+        st["reps_processed"] := reps_done;
+        st["canon_nulls"] := canon_nulls;
+        st["aut_nulls"] := aut_nulls;
+        st["adjacency"] := adj_status;
+        st["t_enum"] := t_enum;
+        st["t_adj"] := t_adj;
+        st["t_lattices"] := t_lattices;
+        st["max_lat_time"] := max_lat_time;
+        st["t_total"] := Realtime(genus_t0);
+        stats_format := Split(Split(Read("fill_stats.format"), "\n")[1], "|");
+        Write(LabelPath("fill_stats", label : Create), Join([Sprintf("%o", st[k]) : k in stats_format], "|") : Overwrite);
+    end if;
     return;
 end intrinsic;

@@ -50,10 +50,12 @@ for G in [ DiagonalJoin(IdentityMatrix(Integers(), 3), CartanMatrix("A2")),
         Sprintf("odd lattice %o: orbit vs p-neighbour canonical forms", G));
 end for;
 
-// Content reduction: a scaled lattice has the scaled representatives.
+// Content reduction: a scaled lattice has the scaled representatives.  Up to
+// isometry: with a populated orth_cache/ (any pipeline run in this checkout) the
+// representative comes back in the cached basis, not the Cartan matrix's.
 reps := GenusRepresentativesOrth(LatticeWithGram(3 * CartanMatrix("D4")));
 AssertTrue(~results,
-    #reps eq 1 and GramMatrix(reps[1]) eq 3 * GramMatrix(LatticeWithGram(CartanMatrix("D4"))),
+    #reps eq 1 and IsIsometric(reps[1], LatticeWithGram(3 * CartanMatrix("D4"))),
     "content reduction: 3*D4");
 
 // Batch enumeration: same answers as single-target calls; targets of equal

@@ -1,0 +1,135 @@
+--- package/Lattice/Lat/neighbors.m
++++ package/Lattice/Lat/neighbors.m
+@@ -143,6 +143,50 @@
+ 			    Genus funcs
+ *******************************************************************************/
+ 
++function FormLess(x, y)
++   // lexicographic order on triples
++   for i in [1..3] do
++      if x[i] ne y[i] then return x[i] lt y[i]; end if;
++   end for;
++   return false;
++end function;
++
++function LeastForm(S)
++   m := S[1];
++   for x in S do
++      if FormLess(x, m) then m := x; end if;
++   end for;
++   return m;
++end function;
++
++function ProperClassKey(f)
++   // The least form, as a triple, in the cycle of reduced forms of the indefinite
++   // form f: a canonical representative of its proper equivalence class.
++   return LeastForm([ [ h[1], h[2], h[3] ] : h in ReductionOrbit(Reduction(f)) ]);
++end function;
++
++function IndefiniteGenusKeys(g, proper : Power := 2)
++   // The proper equivalence classes (if proper) or the GL_2(Z)-classes in the
++   // genus (Power = 2) or proper spinor genus (Power = 4) of the indefinite
++   // primitive form g, as canonical triples.
++   // ClassGroup(Q) is the class group in the wide sense, of index 2 in the group
++   // C of proper classes when the fundamental unit has norm +1; its elements then
++   // lift to two proper classes in different genera, so g*h(x) for x in 2*G need
++   // not lie in the genus of g.  Also, the forms g*h(x) are not reduced in any
++   // canonical way, so (a,|b|,c) does not identify a class with its mirror image.
++   // ReducedForms(Q) has one form in each proper class; the genus of g is g*C^2,
++   // and its proper spinor genus is g*C^4 (an element of the adelic spinor kernel
++   // of SO(V) = K^1 is v/vbar with N(v) a local square everywhere, hence the
++   // square of a norm-one idele).
++   Q := Parent(g);
++   keys := { ProperClassKey(g*f^Power) : f in ReducedForms(Q) };
++   if not proper then
++      // the mirror image (a,-b,c) of f is improperly equivalent to f
++      keys := { LeastForm([ k, ProperClassKey(Q ! [ k[1], -k[2], k[3] ]) ]) : k in keys };
++   end if;
++   return keys;
++end function;
++
+ function BinaryGenusRepresentatives(L, proper, natural)
+    // Could do better by a factor of 2 by not computing full  
+    // equivalence class group.
+@@ -157,13 +201,18 @@
+    D := -Determinant(L); 
+    Q := QuadraticForms(D);
+    g := Q ! [ Norm(L.1) div 2, (L.1,L.2), Norm(L.2) div 2 ];
+-   G, h := ClassGroup(Q);
+-   if proper then 
+-      S:= { SymmetricMatrix([ Rationals() | 2*f[1], f[2], 2*f[3] ])
+-            where f:= g*h(x) : x in 2*G };
++   if D gt 0 then
++      S := { SymmetricMatrix([ Rationals() | 2*k[1], k[2], 2*k[3] ])
++            : k in IndefiniteGenusKeys(g, proper) };
+    else
+-      S:= { SymmetricMatrix([ Rationals() | 2*f[1], Abs(f[2]), 2*f[3] ])
+-            where f:= g*h(x) : x in 2*G };
++      G, h := ClassGroup(Q);
++      if proper then 
++         S:= { SymmetricMatrix([ Rationals() | 2*f[1], f[2], 2*f[3] ])
++               where f:= g*h(x) : x in 2*G };
++      else
++         S:= { SymmetricMatrix([ Rationals() | 2*f[1], Abs(f[2]), 2*f[3] ])
++               where f:= g*h(x) : x in 2*G };
++      end if;
+    end if;
+    // !! TODO - map back to the underlying quadratic space when Natural
+    return [ LatticeWithGram(c * s : CheckPositive := false) : s in S ];
+@@ -181,13 +230,19 @@
+    D := -Determinant(L); 
+    Q := QuadraticForms(D);
+    g := Q ! [ Norm(L.1) div 2, (L.1,L.2), Norm(L.2) div 2 ];
+-   G, h := ClassGroup(Q);
+-   if proper then
+-      S:= { SymmetricMatrix([ Rationals() | 2*f[1], f[2], 2*f[3] ])
+-            where f:= g*h(x) : x in 4*G };
++   if D gt 0 then
++      // see IndefiniteGenusKeys
++      S := { SymmetricMatrix([ Rationals() | 2*k[1], k[2], 2*k[3] ])
++            : k in IndefiniteGenusKeys(g, proper : Power := 4) };
+    else
+-      S:= { SymmetricMatrix([ Rationals() | 2*f[1], Abs(f[2]), 2*f[3] ])
+-            where f:= g*h(x) : x in 4*G };
++      G, h := ClassGroup(Q);
++      if proper then
++         S:= { SymmetricMatrix([ Rationals() | 2*f[1], f[2], 2*f[3] ])
++               where f:= g*h(x) : x in 4*G };
++      else
++         S:= { SymmetricMatrix([ Rationals() | 2*f[1], Abs(f[2]), 2*f[3] ])
++               where f:= g*h(x) : x in 4*G };
++      end if;
+    end if;
+    // !! TODO - map back to the underlying quadratic space when Natural
+    return [ LatticeWithGram(c * s : CheckPositive := false) : s in S ];
+@@ -738,10 +793,10 @@
+    end if;
+    c := Content(L);
+    if c ne 1 then
+-      L := LatticeWithGram((1/c)*GramMatrix(L));
++      L := LatticeWithGram((1/c)*GramMatrix(L) : CheckPositive := false);
+    end if;
+    if IsOdd(L) then
+-      L := LatticeWithGram(2*GramMatrix(L));
++      L := LatticeWithGram(2*GramMatrix(L) : CheckPositive := false);
+       c := c/2;
+    end if;
+    D := -Determinant(L); 
+@@ -755,7 +810,7 @@
+    S := { C | f*g, f*g^-1 };
+    return [ N : N in { LatticeWithGram( 
+       c * MatrixAlgebra(Integers(),2) !
+-         [ 2*f[1], Abs(f[2]), Abs(f[2]), 2*f[3] ]) :
++         [ 2*f[1], Abs(f[2]), Abs(f[2]), 2*f[3] ] : CheckPositive := false) :
+             f in S } ];
+ end function;
+ 
+@@ -798,7 +853,7 @@
+ 
+    c := Content(L);
+    if c ne 1 then
+-      L := LatticeWithGram((1/c)*GramMatrix(L));
++      L := LatticeWithGram((1/c)*GramMatrix(L) : CheckPositive := false);
+    end if;
+    require Type(Depth) eq RngIntElt and Depth ge -1:
+       "Parameter 'Depth' should be a non-negative integer.";
