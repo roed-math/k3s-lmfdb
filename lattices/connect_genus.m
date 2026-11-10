@@ -941,8 +941,8 @@ two-pass connect in run_all.py).}
                 lat["dual_density"], lat["dual_hermite"], lat["dual_kissing"] := Explode(dg);
             end if;
         end if;
-        // dual_theta_series / dual_theta_prec are computed and stored in FillGenus
-        // (lat_basic.format), so they are not recomputed here.
+        // The dual's theta series is not stored (FillGenus computes it only to sort
+        // the genus); it is the theta series of the lattice dual_label names.
 
         // Criterion-set layer of universality/regularity (definite only); the
         // db-relative layer runs once the Oscar embedding stage has produced

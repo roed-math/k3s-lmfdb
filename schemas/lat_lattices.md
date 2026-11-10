@@ -73,14 +73,11 @@ Label: `dimension.signature.determinant.genus_spec.tiebreaker` where
 | canonical_gram | integer[] | Canonical form for the Gram matrix; currently only available for definite lattices |
 | [genus_label](https://beta.lmfdb.org/Lattice/Labels) | text | The part of the label that is constant across a genus |
 | conway_symbol | text | the Conway symbol for the genus |
-| pneighbors | jsonb | a dictionary with primes as keys and a list of labels as values (the p-neighbors) |
 | discriminant_group_invs | integer[] | Smith-style invariants for the discriminant group |
 | discriminant_group_exponent | integer | Exponent of the discriminant group |
 | festi_veniani_index | numeric | the Festi-Veniani index [O(q_L) : im O(L)]: the index of the image of the automorphism group of L in the orthogonal group of its discriminant form (definite lattices; computed by oscar/fix_festi_veniani.jl) |
 | is_even | boolean | whether the lattice is even |
 | dual_label | text | the label for the rescaled dual lattice (may be null if the discriminant is too large) |
-| dual_theta_series | numeric[] | the theta series of the rescaled dual lattice |
-| dual_theta_prec | integer | Absolute precision of the dual theta series |
 | dual_hermite | numeric | the Hermite number of the rescaled dual lattice (only for definite lattices) |
 | dual_kissing | bigint | the kissing number of the rescaled dual lattice (only for definite lattices) |
 | dual_density | numeric | the center density of the rescaled dual lattice (only for definite lattices) |

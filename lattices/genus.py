@@ -659,11 +659,11 @@ def create_lattice_entry(gram):
     # Basic invs (rank, nplus, det, disc, class_number, discriminant_group_invs, is_even)
     # Gram (gram, canonical_gram)
     # Labels (genus_label, label, name, conway_symbol)
-    # Dual (dual_label, dual_theta_series, dual_hermite, dual_kissing, dual_density, dual_det, dual_conway)
+    # Dual (dual_label, dual_hermite, dual_kissing, dual_density, dual_det, dual_conway)
     # Automorphism group (aut_size, aut_label, festi_veniani_index)
     # Packing info (density, hermite, kissing, minimum) -> Density, HermiteNumber, KissingNumber, Minimum
     # Representing integers (level, theta_series) ThetaSeries (TODO: figure out precision.  Max(trace_bound, 100, minimum+4) or something; going up to trace bound should mean we distinguish between lattices in the genus that have different theta series.  Compute trace bound in half integral weight using Shimura isomorphism)
-    # Neighbors (pneighbors)
+    # Neighbors: the genus adjacency_matrix (no per-lattice pneighbors)
     pass
 
 def fill_genus_entry(label, hecke_primes=[2]):
@@ -737,13 +737,11 @@ COL_TYPE_LATTICE = {'det_abs': 'bigint',
  'gram': 'integer[]',
  'gram_is_canonical': 'boolean',
  'gram_others': 'integer[]',
- 'pneighbors': 'jsonb',
  'aut_size': 'numeric',
  'density': 'numeric',
  'dual_density': 'numeric',
  'dual_hermite': 'numeric',
  'hermite': 'numeric',
- 'dual_theta_series': 'numeric[]',
  'theta_series': 'numeric[]',
  'aut_label': 'text',
  'conway_symbol': 'text',
@@ -753,7 +751,6 @@ COL_TYPE_LATTICE = {'det_abs': 'bigint',
  'label': 'text',
  'aut_group': 'text',
  'theta_prec': 'smallint',
- 'dual_theta_prec': 'smallint',
  'name': 'text',
  'is_indecomposable': 'boolean',
  'is_additively_indecomposable': 'boolean',

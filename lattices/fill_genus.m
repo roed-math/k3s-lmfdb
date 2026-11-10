@@ -433,7 +433,7 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
         // class number 1.  We estimate that work and skip the matrix past adjlimit (a
         // work budget), an adaptive cutoff that captures both the rank and class-number
         // dependence, rather than a crude cap on either alone.  The class number is still
-        // recorded, and pneighbors below is emitted only when the matrix exists.
+        // recorded.
         adj_work := #reps * (&+[Integers() | p^Maximum(n-2, 0) : p in hecke_primes(n)]);
         have_adjacency := (n eq s) and ((adjlimit le 0) or (adj_work le adjlimit));
         if have_adjacency then
@@ -461,7 +461,7 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
             advanced["adjacency_matrix"] := to_postgres(hecke_mats);
             advanced["adjacency_polynomials"] := to_postgres(hecke_polys);
           else
-            have_adjacency := false;   // no Hecke data -> the pneighbors block below is skipped
+            have_adjacency := false;
           end if;
         end if;
     else
@@ -699,8 +699,8 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
                 lat["theta_series"] := [1];
                 lat["theta_prec"] := 1;
             end if;
-            // Dual theta series (used as a tie-breaker in cmp_lat below, and stored
-            // alongside the primal theta series).
+            // Dual theta series: a tie-breaker in cmp_lat below, not stored (dropped
+            // from lat_basic.format on 2026-11-09 for size; dual_label points to it).
             dual_theta, dual_theta_prec := ThetaSeriesIncremental(D, Max(150, dm + 4), to_per_rep : Min := dm);
             if dual_theta_prec gt 0 then
                 lat["dual_theta_series"] := dual_theta;
@@ -802,15 +802,10 @@ lattice -- the data for calibrating the guards (calibrate_fill.py).}
     for idx->L in lats do
         lat := L;
         Remove(~lat, "fv_image");
-        if have_adjacency then   // pneighbors are read off the Hecke matrix, so only when it was computed
-            pNeighbors := AssociativeArray();
-            for p in hecke_primes(n) do
-                pNeighbors[p] := ["\"" * lats[j]["label"] * "\"" : j in [1..#lats] | hecke_mats[p][idx, j] ne 0];
-            end for;
-            lat["pneighbors"] := to_postgres(pNeighbors);
-        else
-            lat["pneighbors"] := "\\N";
-        end if;
+        // only used to sort the genus (cmp_lat); the p-neighbours of a lattice are
+        // its row of the genus's adjacency_matrix, so no per-lattice copy is stored
+        Remove(~lat, "dual_theta_series");
+        Remove(~lat, "dual_theta_prec");
         Remove(~lat, "lattice");
         error if Keys(lat) ne Set(lat_format), [k : k in lat_format | k notin Keys(lat)], [k : k in Keys(lat) | k notin lat_format];
         output := Join([Sprintf("%o", to_postgres(lat[k])) : k in lat_format], "|");
